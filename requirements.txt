@@ -1,0 +1,14 @@
+adblockparser==0.7
+crypto_rust==0.1.0
+cryptography==44.0.2
+dnspython==2.7.0
+joblib==1.4.2
+numpy==2.2.4
+oqs==0.10.2
+pycryptodome==3.21.0
+PySide6==6.8.2.1
+PySide6_Addons==6.8.2.1
+PySide6_Essentials==6.8.2.1
+Requests==2.32.3
+scikit_learn==1.6.1
+stem==1.8.2
