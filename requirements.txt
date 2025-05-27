@@ -14,3 +14,4 @@ PySide6_Essentials==6.8.2.1
 Requests==2.32.3
 scikit_learn==1.6.1
 stem==1.8.2
+matplotlib==3.10.3
