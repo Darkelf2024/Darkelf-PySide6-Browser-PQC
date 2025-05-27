@@ -94,7 +94,7 @@ python darkelf768.py
 ```
 
 ## 📚 License
-**GPLv3** — Community contribution and independent review encouraged.
+**LGPLv3** — Community contribution and independent review encouraged.
 
 ## 🔗 Project Website
 [https://darkelfbrowser.com](https://darkelfbrowser.com)
