@@ -5,7 +5,8 @@
 
 version: 2
 updates:
-  - package-ecosystem: "" # See documentation for possible values
-    directory: "/" # Location of package manifests
+  - package-ecosystem: "pip" # Python package manager
+    directory: "/" # Location of the requirements.txt file
     schedule:
-      interval: "weekly"
+      interval: "weekly" # Update dependencies weekly
+    # Optionally, you can add more configuration here, such as assignees, reviewers, or labels.
