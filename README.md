@@ -80,7 +80,7 @@ Includes:
 Clone:
 ```bash
 git clone https://github.com/Darkelf2024/Darkelf-Browser.git
-cd Darkelf-Browser-Kyber768/1024
+cd Darkelf-Browser-ML-KEM-768/1024
 ```
 
 Install requirements:
