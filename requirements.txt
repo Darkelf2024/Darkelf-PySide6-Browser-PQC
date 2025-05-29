@@ -1,6 +1,6 @@
 adblockparser==0.7
 crypto_rust==0.1.0
-cryptography==44.0.2
+cryptography==45.0.3
 dnspython==2.7.0
 joblib==1.5.1
 numpy==2.2.4
