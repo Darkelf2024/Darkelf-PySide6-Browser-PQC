@@ -10,13 +10,13 @@ Darkelf is available in two post-quantum variants:
 
 | Edition       | PQ Crypto   | ML Detection | Status       | Notes                                  |
 |---------------|-------------|--------------|--------------|----------------------------------------|
-| **Kyber768**  | Kyber768    | ✅           | ✅ Tested     | Balanced performance and encryption    |
-| **Kyber1024** | Kyber1024   | ✅           | ✅ Production | Highest-strength security tier         |
+| **ML-KEM-768**  | ML-KEM768    | ✅           | ✅ Production    | Balanced performance and encryption    |
+| **ML-KEM-1024** | ML-KEM1024   | ✅           | ✅ Production | Highest-strength security tier         |
 
 ## 🔒 Core Capabilities
 
 ### 🔐 Post-Quantum Cryptography
-- Uses **Kyber768** or **Kyber1024** from liboqs
+- Uses **ML-KEM-768** or **ML-KEM-1024** from liboqs
 - Implements secure key encapsulation (KEM)
 - Derives AES-GCM session keys via HKDF
 - Keys and secrets live only in memory
