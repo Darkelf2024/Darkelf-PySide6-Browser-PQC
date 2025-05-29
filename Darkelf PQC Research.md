@@ -2,7 +2,7 @@
 
 ## Abstract
 
-This paper presents **Darkelf Browser v3.0**, an open-source, hardened web browser designed for operational security in hostile environments. Built with memory-resident anti-forensics, machine learning-powered malicious JavaScript detection, and post-quantum cryptographic protections, Darkelf seeks to raise the standard of privacy-first, investigator-oriented software. This version integrates the **Kyber768** and **Kyber1024** key encapsulation mechanisms from the NIST PQC finalists, offering quantum-resilient encryption alongside forensic evasion and real-time telemetry interception. Designed by Dr. Kevin Moore, the browser is released under the **LGPL license** and available at [https://darkelfbrowser.com](https://darkelfbrowser.com).
+This paper presents **Darkelf Browser v3.0**, an open-source, hardened web browser designed for operational security in hostile environments. Built with memory-resident anti-forensics, machine learning-powered malicious JavaScript detection, and post-quantum cryptographic protections, Darkelf seeks to raise the standard of privacy-first, investigator-oriented software. This version integrates the **ML-KEM-768** and **ML-KEM-1024** key encapsulation mechanisms from the NIST PQC finalists, offering quantum-resilient encryption alongside forensic evasion and real-time telemetry interception. Designed by Dr. Kevin Moore, the browser is released under the **LGPL license** and available at [https://darkelfbrowser.com](https://darkelfbrowser.com).
 
 ## 1. Introduction
 
