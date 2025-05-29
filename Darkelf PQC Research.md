@@ -10,7 +10,7 @@ The rise of advanced tracking techniques, remote forensic tooling, and post-quan
 
 ## 2. Post-Quantum Cryptography Implementation
 
-Darkelf supports both **Kyber768** and **Kyber1024**, two lattice-based key encapsulation mechanisms standardized by NIST. Using the **liboqs** library, the browser generates ephemeral keypairs per session:
+Darkelf supports both **ML-KEM-768** and **ML-KEM-1024**, two lattice-based key encapsulation mechanisms standardized by NIST. Using the **liboqs** library, the browser generates ephemeral keypairs per session:
 
 * **Ephemeral Keypairs**: Generated in RAM only; keys are destroyed on close.
 * **AES-GCM Session Encryption**: Shared secrets derived via HKDF to form AES-256-GCM symmetric keys.
