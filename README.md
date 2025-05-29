@@ -20,6 +20,8 @@ Darkelf is available in two post-quantum variants:
 - Implements secure key encapsulation (KEM)
 - Derives AES-GCM session keys via HKDF
 - Keys and secrets live only in memory
+- New: `darkelfCrypto` Web API exposed to JavaScript
+- JavaScript access to PQ-safe encryption/decryption via QWebChannel
 
 ### 🧠 Real-Time JavaScript Malware Detection
 - Trained `RandomForestClassifier` (scikit-learn)
@@ -54,10 +56,12 @@ Darkelf is available in two post-quantum variants:
 
 - `darkelf.py`: Main application launcher
 - `kyber_crypto.py`: Post-quantum key encapsulation logic
+- `PQCryptoAPI`: QWebChannel binding for Kyber-based JS encryption
 - `ml_script_classifier.pkl`: Trained ML model (malicious JS detection)
 - `scaler.pkl`: StandardScaler model for feature normalization
 - `.ml_script_classifier.sha256`: SHA256 of model for hash check
 - `CustomWebEnginePage`: Custom JS log parser and ML hook
+- `CustomWebEngineView`: Script injector + PQ WebChannel binding
 - `StealthCovertOps`: RAM-only logging and anti-forensics
 - `ObfuscatedEncryptedCookieStore`: Secure ephemeral cookie store
 
@@ -125,10 +129,4 @@ Use at your own risk. The author makes no warranties or guarantees regarding fit
 Darkelf Browser includes cryptographic functionality and may be subject to U.S. Export Administration Regulations (EAR). It is released in full compliance with EAR §740.13(e) and is made publicly available via open-source distribution for unrestricted access.
 
 Users are responsible for ensuring compliance with all applicable local, national, and international laws regarding cryptographic software and cybersecurity tools. The developer disclaims liability for misuse or deployment in prohibited jurisdictions.
-
-⸻
-
-📄 License
-
-Darkelf Browser is released under the LGPL open-source license, promoting transparency, reproducibility, and responsible research. Redistribution, modification, and peer review are encouraged under the terms of the license.
 
