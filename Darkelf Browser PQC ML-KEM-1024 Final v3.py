@@ -1,4 +1,3 @@
-
 # Darkelf Browser v3.0 – Secure, Privacy-Focused Web Browser
 # Copyright (C) 2025 Dr. Kevin Moore
 #
@@ -785,9 +784,12 @@ class CustomWebEnginePage(QWebEnginePage):
 
     def inject_all_scripts(self):
         self.inject_geolocation_override()
-        self.spoof_window_dimensions()
+        self.spoof_window_dimensions_tor_style()
+        self.apply_letterboxing_stealth()
+        self.block_shadow_dom_inspection()
+        self.block_tracking_requests()
         self.protect_fingerprinting()
-        self.block_canvas_api()
+        self.spoof_canvas_api()
         self.disable_webrtc()
         self.block_webrtc_sdp_logging()
         self.block_supercookies()
@@ -801,9 +803,14 @@ class CustomWebEnginePage(QWebEnginePage):
         self.spoof_network_connection()
         self.spoof_device_memory()
         self.disable_pointer_detection()
-        self.block_eval_and_websockets()
         self.block_cookie_beacon_getstats()
         self.block_audio_context()
+        self.spoof_navigator_basics()
+        self.block_window_chrome()
+        self.spoof_permissions_api()
+        self.fuzz_timing_functions()
+        self.spoof_storage_estimate()
+        self.block_fontfaceset_api()
         self.setup_csp()
 
     def inject_geolocation_override(self):
@@ -825,35 +832,136 @@ class CustomWebEnginePage(QWebEnginePage):
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
         
-    def block_audio_context(self):
+    def spoof_navigator_basics(self):
+        script = """
+        (function() {
+            Object.defineProperty(navigator, "webdriver", {
+                get: () => false,
+                configurable: true
+            });
+            Object.defineProperty(navigator, "doNotTrack", {
+                get: () => "1",
+                configurable: true
+            });
+            Object.defineProperty(navigator, "maxTouchPoints", {
+                get: () => 1,
+                configurable: true
+            });
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+
+    def block_window_chrome(self):
+        script = """
+        (function() {
+            Object.defineProperty(window, 'chrome', {
+                value: undefined,
+                configurable: true
+            });
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+   
+    def spoof_permissions_api(self):
+        script = """
+        (function() {
+            if (navigator.permissions && navigator.permissions.query) {
+                navigator.permissions.query = function(params) {
+                    return Promise.resolve({ state: 'denied' });
+                };
+            }
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+   
+    def fuzz_timing_functions(self):
+        script = """
+        (function() {
+            performance.now = () => Math.floor(Math.random() * 50) + 1;
+            Date.now = () => Math.floor(new Date().getTime() / 1000) * 1000;
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+    
+    def spoof_storage_estimate(self):
+        script = """
+        (function() {
+            if (navigator.storage && navigator.storage.estimate) {
+                navigator.storage.estimate = function() {
+                    return Promise.resolve({ quota: 120000000, usage: 50000000 });
+                };
+            }
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+
+    def block_fontfaceset_api(self):
         script = """
         (function() {
             try {
-                // Disable AudioContext completely
-                window.AudioContext = undefined;
-                window.webkitAudioContext = undefined;
-
-                // If already instantiated, override methods
-                const noop = function() {};
-
-                if (typeof OfflineAudioContext !== "undefined") {
-                    OfflineAudioContext.prototype.startRendering = noop;
-                    OfflineAudioContext.prototype.suspend = noop;
-                }
-
-                if (typeof AudioContext !== "undefined") {
-                    AudioContext.prototype.createAnalyser = function() {
-                        return {
-                            getFloatFrequencyData: function(array) {
-                                for (let i = 0; i < array.length; i++) {
-                                    array[i] = -100 + Math.random();  // Fake data
-                                }
-                            }
-                        };
-                    };
-                }
+                document.fonts = {
+                    ready: Promise.resolve(),
+                    check: () => false,
+                    load: () => Promise.reject("Blocked"),
+                    values: () => [],
+                    size: 0
+                };
             } catch (e) {
-                console.warn("AudioContext block failed:", e);
+                console.warn("FontFaceSet override failed", e);
+            }
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+
+    def block_eval_and_websockets(self):
+        script = """
+        (function() {
+            // Monitor eval() usage, but do not block it
+            const originalEval = window.eval;
+            window.eval = function(code) {
+                try {
+                    if (typeof code === 'string' && code.length > 0) {
+                        console.debug("eval() used — allowing:", code.slice(0, 100));
+                    }
+                    return originalEval(code);
+                } catch (e) {
+                    console.warn("eval() error:", e);
+                    return undefined;
+                }
+            };
+
+            // Light filter for suspicious Function constructor usage
+            const OriginalFunction = Function;
+            window.Function = function(...args) {
+                const code = args.join(' ');
+                if (code.includes('eval') || code.includes('setTimeout')) {
+                    console.debug("Suspicious Function constructor blocked:", code.slice(0, 100));
+                    return function() {};  // return a dummy
+                }
+                return OriginalFunction(...args);
+            };
+
+            // Safe WebSocket dummy that won't throw or crash detection
+            const DummySocket = function(url, protocols) {
+                console.debug("WebSocket attempt intercepted:", url);
+                return {
+                    send: () => {},
+                    close: () => {},
+                    addEventListener: () => {},
+                    removeEventListener: () => {},
+                    readyState: 3,  // CLOSED
+                    bufferedAmount: 0
+                };
+            };
+
+            // Only override WebSocket if it's present
+            if ('WebSocket' in window) {
+                window.WebSocket = DummySocket;
+                Object.defineProperty(window, 'WebSocket', {
+                    value: DummySocket,
+                    writable: false,
+                    configurable: true
+                });
             }
         })();
         """
@@ -892,30 +1000,81 @@ class CustomWebEnginePage(QWebEnginePage):
         })();
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+        
+    def apply_letterboxing_stealth(self):
+        script = """
+        (function () {
+            const getRandomOffset = () => Math.floor(Math.random() * 5) - 2;  // -2 to +2 pixels
 
-    def block_eval_and_websockets(self):
+            // Spoof window dimensions
+            Object.defineProperty(window, 'innerWidth', {
+                get: () => 1200 + getRandomOffset(),
+                configurable: true
+            });
+            Object.defineProperty(window, 'innerHeight', {
+                get: () => 800 + getRandomOffset(),
+                configurable: true
+            });
+            Object.defineProperty(window, 'outerWidth', {
+                get: () => 1600 + getRandomOffset(),
+                configurable: true
+            });
+            Object.defineProperty(window, 'outerHeight', {
+                get: () => 900 + getRandomOffset(),
+                configurable: true
+            });
+
+            // Spoof screen dimensions
+            Object.defineProperty(screen, 'width', {
+                get: () => 1600 + getRandomOffset(),
+                configurable: true
+            });
+            Object.defineProperty(screen, 'height', {
+                get: () => 900 + getRandomOffset(),
+                configurable: true
+            });
+            Object.defineProperty(screen, 'availWidth', {
+                get: () => 1600 + getRandomOffset(),
+                configurable: true
+            });
+            Object.defineProperty(screen, 'availHeight', {
+                get: () => 860 + getRandomOffset(),
+                configurable: true
+            });
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+
+    def block_audio_context(self):
         script = """
         (function() {
-            // Block eval
-            window.eval = function() {
-                throw new Error("eval() is disabled for security reasons.");
-            };
+            try {
+                // Disable AudioContext completely
+                window.AudioContext = undefined;
+                window.webkitAudioContext = undefined;
 
-            // Block Function constructor (indirect eval)
-            window.Function = function() {
-                throw new Error("Function constructor is disabled.");
-            };
+                // If already instantiated, override methods
+                const noop = function() {};
 
-            // Block WebSocket
-            window.WebSocket = function() {
-                throw new Error("WebSocket is disabled.");
-            };
+                if (typeof OfflineAudioContext !== "undefined") {
+                    OfflineAudioContext.prototype.startRendering = noop;
+                    OfflineAudioContext.prototype.suspend = noop;
+                }
 
-            // Block WebSocket subclassing
-            Object.defineProperty(window, 'WebSocket', {
-                writable: false,
-                configurable: false
-            });
+                if (typeof AudioContext !== "undefined") {
+                    AudioContext.prototype.createAnalyser = function() {
+                        return {
+                            getFloatFrequencyData: function(array) {
+                                for (let i = 0; i < array.length; i++) {
+                                    array[i] = -100 + Math.random();  // Fake data
+                                }
+                            }
+                        };
+                    };
+                }
+            } catch (e) {
+                console.warn("AudioContext block failed:", e);
+            }
         })();
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
@@ -1129,22 +1288,100 @@ class CustomWebEnginePage(QWebEnginePage):
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
 
-    def spoof_window_dimensions(self):
+    def spoof_window_dimensions_tor_style(self):
         script = """
         (function () {
-            Object.defineProperty(window, 'innerWidth', { get: () => 1200 });
-            Object.defineProperty(window, 'innerHeight', { get: () => 800 });
-            Object.defineProperty(window, 'outerWidth', { get: () => 1600 });
-            Object.defineProperty(window, 'outerHeight', { get: () => 900 });
+            // Force fixed dimensions that align with Tor's standard sizing buckets
+            const fixedWindow = {
+                innerWidth: 1000,
+                innerHeight: 1000,
+                outerWidth: 1000,
+                outerHeight: 1000
+            };
 
-            Object.defineProperty(screen, 'width', { get: () => 1600 });
-            Object.defineProperty(screen, 'height', { get: () => 900 });
-            Object.defineProperty(screen, 'availWidth', { get: () => 1600 });
-            Object.defineProperty(screen, 'availHeight', { get: () => 860 });
-            Object.defineProperty(screen, 'colorDepth', { get: () => 24 });
+            Object.defineProperty(window, 'innerWidth', {
+                get: () => fixedWindow.innerWidth,
+                configurable: true
+            });
+            Object.defineProperty(window, 'innerHeight', {
+                get: () => fixedWindow.innerHeight,
+                configurable: true
+            });
+            Object.defineProperty(window, 'outerWidth', {
+                get: () => fixedWindow.outerWidth,
+                configurable: true
+            });
+            Object.defineProperty(window, 'outerHeight', {
+                get: () => fixedWindow.outerHeight,
+                configurable: true
+            });
+
+            Object.defineProperty(screen, 'width', {
+                get: () => 1000,
+                configurable: true
+            });
+            Object.defineProperty(screen, 'height', {
+                get: () => 1000,
+                configurable: true
+            });
+            Object.defineProperty(screen, 'availWidth', {
+                get: () => 1000,
+                configurable: true
+            });
+            Object.defineProperty(screen, 'availHeight', {
+                get: () => 980,
+                configurable: true
+            });
+            Object.defineProperty(screen, 'colorDepth', {
+                get: () => 24,
+                configurable: true
+            });
         })();
         """
-        self.inject_script(script, injection_point=QWebEngineScript.DocumentReady, subframes=False)
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+        
+    def block_shadow_dom_inspection(self):
+        script = """
+        (function () {
+            const originalAttachShadow = Element.prototype.attachShadow;
+            Element.prototype.attachShadow = function(init) {
+                init.mode = 'closed';  // Force closed mode
+                return originalAttachShadow.call(this, init);
+            };
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+
+    def block_tracking_requests(self):
+        script = """
+        (function () {
+            const suspiciousPatterns = ['tracker', 'analytics', 'collect', 'pixel'];
+
+            const shouldBlock = (url) => {
+                return suspiciousPatterns.some(p => url.includes(p));
+            };
+
+            const originalXHRopen = XMLHttpRequest.prototype.open;
+            XMLHttpRequest.prototype.open = function(method, url) {
+                if (shouldBlock(url)) {
+                    console.warn('Blocked XHR to:', url);
+                    return;
+                }
+                return originalXHRopen.apply(this, arguments);
+            };
+
+            const originalFetch = window.fetch;
+            window.fetch = function(...args) {
+                const url = args[0];
+                if (typeof url === 'string' && shouldBlock(url)) {
+                    console.warn('Blocked fetch to:', url);
+                    return new Promise(() => {}); // Never resolves
+                }
+                return originalFetch.apply(this, args);
+            };
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
 
     def block_webrtc_sdp_logging(self):
         script = """
@@ -1406,21 +1643,52 @@ class CustomWebEnginePage(QWebEnginePage):
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
 
-    def block_canvas_api(self):
-        script = """
-        (function() {
-            const noop = function() { return null; };
-            const methods = [
-                "getContext", "toDataURL", "toBlob", "getImageData", "measureText", "fillText", "strokeText"
-            ];
+    def spoof_canvas_api(self):
 
-            methods.forEach(m => {
-                HTMLCanvasElement.prototype[m] = noop;
-                if (typeof OffscreenCanvas !== "undefined") {
-                    OffscreenCanvas.prototype[m] = noop;
-                }
-            });
-        })();
+        # Generate session-specific noise seed
+        seed = random.randint(1000, 9999) + int(time.time()) % 10000
+
+        script = f"""
+        (function () {{
+            const seed = {seed};
+            const getNoise = () => Math.floor(Math.sin(seed * 1000 + performance.now()) * 10) % 5;
+
+            // getImageData override
+            const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+            CanvasRenderingContext2D.prototype.getImageData = function(x, y, w, h) {{
+                const imageData = originalGetImageData.call(this, x, y, w, h);
+                for (let i = 0; i < imageData.data.length; i += 4) {{
+                    imageData.data[i] += getNoise();
+                    imageData.data[i + 1] += getNoise();
+                    imageData.data[i + 2] += getNoise();
+                }}
+                return imageData;
+            }};
+
+            // toDataURL override
+            const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+            HTMLCanvasElement.prototype.toDataURL = function() {{
+                const ctx = this.getContext("2d");
+                if (ctx) ctx.fillRect(getNoise(), getNoise(), 1, 1);
+                return originalToDataURL.apply(this, arguments);
+            }};
+
+            // measureText spoof
+            const originalMeasureText = CanvasRenderingContext2D.prototype.measureText;
+            CanvasRenderingContext2D.prototype.measureText = function(text) {{
+                const metrics = originalMeasureText.call(this, text);
+                metrics.width += getNoise();
+                return metrics;
+            }};
+
+            // toBlob override
+            const originalToBlob = HTMLCanvasElement.prototype.toBlob;
+            HTMLCanvasElement.prototype.toBlob = function(callback, ...args) {{
+                const ctx = this.getContext("2d");
+                if (ctx) ctx.fillRect(getNoise(), getNoise(), 1, 1);
+                return originalToBlob.call(this, callback, ...args);
+            }};
+        }})();
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
 
@@ -2108,32 +2376,47 @@ class Darkelf(QMainWindow):
 
             tor_path = shutil.which("tor")
 
-            if not os.path.exists(tor_path):
+            if not tor_path or not os.path.exists(tor_path):
                 QMessageBox.critical(self, "Tor Error", "Tor executable not found! Install it using 'brew install tor'.")
                 return
 
+            # Optimized Tor configuration
+            tor_config = {
+                'SocksPort': '9052',
+                'ControlPort': '9053',
+                'DNSPort': '9054',
+                'AutomapHostsOnResolve': '1',
+                'VirtualAddrNetworkIPv4': '10.192.0.0/10',
+                'CircuitBuildTimeout': '10',
+                'MaxCircuitDirtiness': '180',
+                'NewCircuitPeriod': '120',
+                'NumEntryGuards': '2',
+                'AvoidDiskWrites': '1',
+                'CookieAuthentication': '1',
+                'DataDirectory': '/tmp/darkelf-tor-data',
+                'Log': 'notice stdout'
+            }
+
             self.tor_process = stem.process.launch_tor_with_config(
                 tor_cmd=tor_path,
-                config={
-                    'SocksPort': '9052',
-                    'ControlPort': '9053',
-                    'DNSPort': '9054',
-                    'AutomapHostsOnResolve': '1',
-                    'VirtualAddrNetworkIPv4': '10.192.0.0/10',
-                },
-                init_msg_handler=lambda line: print(line) if 'Bootstrapped ' in line else None,
-            )
+                config=tor_config,
+                init_msg_handler=lambda line: print("[tor]", line)
+                #init_msg_handler=lambda line: print(line) if 'Bootstrapped ' in line else None
+            )  # <== THIS closes the call properly
 
             self.controller = Controller.from_port(port=9053)
-            self.controller.authenticate()
+            cookie_path = os.path.join('/tmp/darkelf-tor-data', 'control_auth_cookie')
+            authenticate_cookie(self.controller, cookie_path=cookie_path)
+            print("[Darkelf] Tor authenticated via cookie.")
+            
             print("Tor started successfully.")
 
-            # Optional test message through SOCKS with obfuscation
+            # Optional SOCKS test with ML-KEM wrapping (if used in your stack)
             try:
                 test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 test_sock.connect(("127.0.0.1", 9052))
-                protector = NetworkProtector(test_sock)
-                protector.send_protected(b"Darkelf test message through Tor SOCKS")
+                protector = NetworkProtector(test_sock)  # Assuming this wraps ML-KEM
+                protector.send_protected(b"[Darkelf] Tor SOCKS test with PQC")
                 test_sock.close()
             except Exception as e:
                 print(f"[Darkelf] Failed test connection through Tor SOCKS: {e}")
@@ -3021,4 +3304,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
