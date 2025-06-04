@@ -4,6 +4,7 @@ Hardened Local-Only JS Classifier Training Script
 - NO telemetry, NO external connections
 - Designed for secure environments and PQ-encrypted workflows (e.g., ML-KEM-1024)
 - Outputs are local only (classifier, scaler, metadata, hash)
+#
 
 
 import joblib
