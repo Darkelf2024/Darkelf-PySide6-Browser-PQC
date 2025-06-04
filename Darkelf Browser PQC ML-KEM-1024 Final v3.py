@@ -537,7 +537,7 @@ class CustomWebEnginePage(QWebEnginePage):
             self.script_classifier_model = joblib.load(self.model_path)
             self.scaler = joblib.load(self.scaler_path)
         else:
-            print(f"[!] Model hash check failed: {self.model_path}")
+            print(f"[!] Model hash check failed or file missing: {self.model_path}")
 
     def verify_or_create_hash(self, model_path, hash_path):
         if not os.path.exists(model_path):
@@ -562,27 +562,38 @@ class CustomWebEnginePage(QWebEnginePage):
     def javaScriptConsoleMessage(self, level, message, line, sourceID):
         log_message = f"JavaScript log (level {level}): {message} (line {line} in {sourceID})"
         print(log_message)
-        self.log_file.write(json.dumps({
+
+        log_data = {
             "timestamp": datetime.utcnow().isoformat(),
             "level": level,
             "line": line,
             "url": sourceID,
             "message": message
-        }) + "\n")
+        }
+
+        if self.script_classifier_model and self.scaler:
+            if any(k in message.lower() for k in [
+                "function", "script", "getcontext", "todataurl", "getimagedata",
+                "measuretext", "localstorage", "eval", "googletag", "adsbygoogle",
+                "adservice", "doubleclick", "track", "analytics", "fingerprint"
+            ]):
+                prediction = self.detect_script_class(message)
+                log_data["prediction"] = int(prediction)
+
+                if prediction == 2:
+                    QMessageBox.warning(None, "Blocked!", "Malicious fingerprinting script detected!")
+                elif prediction == 1:
+                    print("[Ad/Tracker] Script detected. Blocking not enforced by default.")
+        else:
+            print("[!] ML model not loaded. Skipping JS analysis.")
+
+        self.log_file.write(json.dumps(log_data) + "\n")
         self.log_file.flush()
 
-        if self.script_classifier_model and any(k in message for k in ["function", "script", "getContext", "toDataURL", "getImageData", "measureText", "localStorage", "eval"]):
-            if self.detect_malicious_script(message):
-                QMessageBox.warning(None, "Blocked!", "Malicious fingerprinting script detected!")
-
-    def detect_malicious_script(self, script_code):
+    def detect_script_class(self, script_code):
         features = self.extract_features(script_code)
-        if self.scaler:
-            features = self.scaler.transform([features])
-        else:
-            features = [features]
-        prediction = self.script_classifier_model.predict(features)
-        return prediction[0] == 1
+        features_scaled = self.scaler.transform([features])
+        return self.script_classifier_model.predict(features_scaled)[0]
 
     def extract_features(self, script):
         length = len(script)
@@ -593,7 +604,6 @@ class CustomWebEnginePage(QWebEnginePage):
         network = sum(script.count(k) for k in ["fetch", "XMLHttpRequest"])
         entropy = self.shannon_entropy(script)
         obf_ratio = self.obfuscation_ratio(script)
-
         return [length, cookie, local, canvas, fonts, network, entropy, obf_ratio]
 
     def shannon_entropy(self, s):
@@ -603,7 +613,6 @@ class CustomWebEnginePage(QWebEnginePage):
         return -sum(p * math.log2(p) for p in prob)
 
     def obfuscation_ratio(self, script):
-        # High presence of escaped chars, unusual symbol use may signal obfuscation
         suspicious = re.findall(r"%[0-9A-Fa-f]{2}|\\x[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}", script)
         return len(suspicious) / len(script) if script else 0
 
