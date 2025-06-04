@@ -100,6 +100,7 @@ from stem.control import Controller
 from collections import defaultdict
 from stem import Signal as StemSignal
 from datetime import datetime
+from sklearn.ensemble import RainForstClassifier
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
