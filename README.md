@@ -125,6 +125,10 @@ Use at your own risk. The author makes no warranties or guarantees regarding fit
 
 ⸻
 
+Darkelf Browser includes a standalone simulation of a post-quantum TLS-like key exchange using the ML-KEM-1024 algorithm. This script demonstrates real-world feasibility of quantum-resistant key encapsulation and AES-GCM session encryption. It verifies secure shared secret derivation between client and server using Kyber1024, and successfully encrypts and decrypts messages using post-quantum symmetric keys. While not yet integrated at the native TLS stack level, this provides a working proof-of-concept for quantum-safe key negotiation, reproducible via the included Python script and available upon request or in the supplementary repo.
+
+⸻
+
 🔐 Legal and Export Notice
 
 Darkelf Browser includes cryptographic functionality and may be subject to U.S. Export Administration Regulations (EAR). It is released in full compliance with EAR §740.13(e) and is made publicly available via open-source distribution for unrestricted access.
