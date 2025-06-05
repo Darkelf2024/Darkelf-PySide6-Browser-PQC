@@ -96,11 +96,12 @@ import subprocess # nosec - All run through sanitizing and validation
 from cryptography.fernet import Fernet
 from shiboken6 import isValid
 import stem.process
+from stem.connection import authenticate_cookie
 from stem.control import Controller
 from collections import defaultdict
 from stem import Signal as StemSignal
 from datetime import datetime
-from sklearn.ensemble import RainForstClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
@@ -822,6 +823,11 @@ class CustomWebEnginePage(QWebEnginePage):
         self.fuzz_timing_functions()
         self.spoof_storage_estimate()
         self.block_fontfaceset_api()
+        self.block_idle_detector()
+        self.block_webauthn()
+        self.spoof_language_headers()
+        self.hide_webdriver_flag()
+        self.patch_youtube_compatibility()
         self.setup_csp()
 
     def inject_geolocation_override(self):
@@ -843,6 +849,97 @@ class CustomWebEnginePage(QWebEnginePage):
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
         
+    def patch_youtube_compatibility(self):
+        script = """
+        (function() {
+            const hostname = window.location.hostname;
+            if (hostname.includes("youtube.com") || hostname.includes("ytimg.com")) {
+                // Restore AudioContext if it's been disabled
+                if (typeof AudioContext === 'undefined' && typeof window.webkitAudioContext !== 'undefined') {
+                    window.AudioContext = window.webkitAudioContext;
+                }
+
+                // Restore Permissions API to return fake prompt for camera/mic
+                if (navigator.permissions && navigator.permissions.query) {
+                    const originalQuery = navigator.permissions.query;
+                    navigator.permissions.query = function(param) {
+                        if (param.name === 'microphone' || param.name === 'camera') {
+                            return Promise.resolve({ state: 'denied' });
+                        }
+                        return originalQuery(param);
+                    };
+                }
+
+                // Restore WebAuthn partially so login overlays don't break
+                if (!window.PublicKeyCredential) {
+                    window.PublicKeyCredential = function() {};
+                }
+
+                // Prevent autoplay restrictions from blocking playback
+                try {
+                    document.addEventListener("DOMContentLoaded", () => {
+                        const vids = document.querySelectorAll("video");
+                        vids.forEach(v => v.muted = true);  // mute for autoplay
+                    });
+                } catch (e) {}
+            }
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentReady)
+
+    def spoof_language_headers(self):
+        script = """
+        (function() {
+            Object.defineProperty(navigator, 'language', {
+                get: function () { return 'en-US'; }
+            });
+            Object.defineProperty(navigator, 'languages', {
+                get: function () { return ['en-US', 'en']; }
+            });
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+        
+    def hide_webdriver_flag(self):
+        script = """
+        (function() {
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => false
+            });
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+
+    def block_webauthn(self):
+        script = """
+        (function() {
+            if (navigator.credentials) {
+                navigator.credentials.get = function() {
+                    return Promise.reject("WebAuthn disabled for security.");
+                };
+                navigator.credentials.create = function() {
+                    return Promise.reject("WebAuthn creation disabled.");
+                };
+            }
+            if (window.PublicKeyCredential) {
+                window.PublicKeyCredential = undefined;
+            }
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+
+    def block_idle_detector(self):
+        script = """
+        (function() {
+            if ('IdleDetector' in window) {
+                window.IdleDetector = function() {
+                    throw new Error("IdleDetector blocked for privacy reasons.");
+                };
+            }
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+
     def spoof_navigator_basics(self):
         script = """
         (function() {
