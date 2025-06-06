@@ -81,6 +81,7 @@ import warnings
 import nacl.public
 from nacl.public import PrivateKey, PublicKey
 from nacl.exceptions import CryptoError
+from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 from PySide6.QtWebChannel import QWebChannel
@@ -405,110 +406,111 @@ def debounce(func, wait):
     
 class MLKEM768Manager:
     """
-    A manager for ML-KEM-768 (Kyber768) key generation, encryption, and decryption using AES-GCM.
-    Handles everything internally using the OQS library.
+    A manager for ML-KEM-768 (Kyber768) using OQS for KEM
+    and AES-GCM for symmetric encryption.
     """
 
-    def __init__(self, data_to_encrypt=None, sync=False):
-        self.kem = None  # Will hold oqs.KeyEncapsulation instance
-        self.kyber_public_key = None
-        self.kyber_private_key = None
-        self.data_to_encrypt = data_to_encrypt or "Default secret"
-        self.encrypted_data = None
-        self.decrypted_data = None
-        self.generate_keys_and_encrypt_in_background()
+    def __init__(self, data_to_encrypt: Optional[str] = None, sync: bool = False):
+        self.kem: Optional[oqs.KeyEncapsulation] = None
+        self.kyber_public_key: Optional[bytes] = None
+        self.kyber_private_key: Optional[bytes] = None
+        self.data_to_encrypt: str = data_to_encrypt or "Default secret"
+        self.encrypted_data: Optional[str] = None
+        self.decrypted_data: Optional[str] = None
+        self._encryption_done = threading.Event()
 
-    def generate_keys_and_encrypt_in_background(self):
-        threading.Thread(target=self.generate_keys_and_encrypt, daemon=True).start()
+        if sync:
+            self.generate_keys_and_encrypt()
+        else:
+            threading.Thread(target=self.generate_keys_and_encrypt, daemon=True).start()
 
-    def generate_keys_and_encrypt(self):
+    def generate_keys_and_encrypt(self) -> None:
         try:
-            # Generate ML-KEM-768 keypair and keep the kem instance
             self.kem = oqs.KeyEncapsulation("ML-KEM-768")
             self.kyber_public_key = self.kem.generate_keypair()
             self.kyber_private_key = self.kem.export_secret_key()
-            print("ML-KEM-768 keys generated successfully.")
+            print("[*] ML-KEM-768 keys generated successfully.")
 
-            # -----------------------------------------
-
-            # Encrypt: encapsulate to get ciphertext and shared secret
             ciphertext, shared_secret = self.kem.encap_secret(self.kyber_public_key)
 
-            # Derive AES key from shared secret
+            salt = os.urandom(16)
             aes_key = HKDF(
                 algorithm=hashes.SHA256(),
                 length=32,
-                salt=None,
+                salt=salt,
                 info=b"mlkem768_aes_key"
             ).derive(shared_secret)
 
             aesgcm = AESGCM(aes_key)
-            nonce = os.urandom(12)  # 96-bit nonce (12 bytes) for AES-GCM
+            nonce = os.urandom(12)
             encrypted = aesgcm.encrypt(nonce, self.data_to_encrypt.encode(), None)
 
-            # Store encrypted result: ciphertext + nonce + aes_encrypted
-            self.encrypted_data = base64.b64encode(ciphertext + nonce + encrypted).decode()
-            print("Data encrypted successfully.")
+            encrypted_blob = {
+                "ciphertext": base64.b64encode(ciphertext).decode(),
+                "nonce": base64.b64encode(nonce).decode(),
+                "payload": base64.b64encode(encrypted).decode(),
+                "salt": base64.b64encode(salt).decode(),
+            }
 
-            # Decrypt immediately to test
+            self.encrypted_data = base64.b64encode(json.dumps(encrypted_blob).encode()).decode()
+            print("[*] Data encrypted successfully.")
+
             self.decrypt_data()
-
         except Exception as e:
-            print(f"Error during encryption: {e}")
+            print(f"[!] Encryption failed: {e}")
+        finally:
+            self._encryption_done.set()
 
-    def decrypt_data(self):
+    def decrypt_data(self) -> None:
         try:
-            # Make sure kem is initialized and private key imported
+            self._encryption_done.wait()
+
             if not self.kem:
                 self.kem = oqs.KeyEncapsulation("ML-KEM-768")
                 self.kem.import_secret_key(self.kyber_private_key)
 
-            # Decode the base64 encrypted data
-            decoded = base64.b64decode(self.encrypted_data)
+            decoded_json = base64.b64decode(self.encrypted_data)
+            blob = json.loads(decoded_json)
 
-            # Dynamically determine ciphertext length
-            ct_len = len(self.kem.encap_secret(self.kyber_public_key)[0])
+            ciphertext = base64.b64decode(blob["ciphertext"])
+            nonce = base64.b64decode(blob["nonce"])
+            encrypted_payload = base64.b64decode(blob["payload"])
+            salt = base64.b64decode(blob["salt"])
 
-            # Extract ciphertext, nonce, and encrypted data
-            ciphertext = decoded[:ct_len]
-            nonce = decoded[ct_len:ct_len + 12]
-            aes_encrypted = decoded[ct_len + 12:]
-
-            # Validate nonce length
             if len(nonce) != 12:
-                raise ValueError(f"Nonce length is invalid: {len(nonce)} (expected 12).")
+                raise ValueError(f"Nonce length is invalid: {len(nonce)} (expected 12 bytes).")
 
-            # Decapsulate the shared secret from the ML-KEM-768 ciphertext
             shared_secret = self.kem.decap_secret(ciphertext)
 
-            # Derive the AES key from the shared secret
             aes_key = HKDF(
                 algorithm=hashes.SHA256(),
                 length=32,
-                salt=None,
+                salt=salt,
                 info=b"mlkem768_aes_key"
             ).derive(shared_secret)
 
             aesgcm = AESGCM(aes_key)
-            decrypted = aesgcm.decrypt(nonce, aes_encrypted, None)
+            decrypted = aesgcm.decrypt(nonce, encrypted_payload, None)
 
             self.decrypted_data = decrypted.decode()
-            print("Data decrypted successfully.")
+            print("[*] Data decrypted successfully.")
         except Exception as e:
-            print(f"Decryption failed: {e}")
+            print(f"[!] Decryption failed: {e}")
 
-    def get_encrypted_data(self):
+    def get_encrypted_data(self) -> Optional[str]:
+        self._encryption_done.wait()
         return self.encrypted_data
 
-    def get_decrypted_data(self):
+    def get_decrypted_data(self) -> Optional[str]:
+        self._encryption_done.wait()
         return self.decrypted_data
 
-    def get_public_key(self):
+    def get_public_key(self) -> Optional[bytes]:
         return self.kyber_public_key
 
-    def get_private_key(self):
+    def get_private_key(self) -> Optional[bytes]:
         return self.kyber_private_key
-    
+
 class PQCryptoAPI(QObject):
     def __init__(self):
         super().__init__()
@@ -2340,7 +2342,7 @@ class Darkelf(QMainWindow):
         self.monitor_timer = None
         
         # --- Synchronous ML-KEM 768 key manager ---
-        self.kyber_manager = MLKEM768Manager(sync=True)
+        self.kyber_manager = MLKEM768Manager(sync=False)
         # Print confirmation in main thread
         print("MLKEM768Manager created in Darkelf.")
 
