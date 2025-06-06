@@ -424,7 +424,6 @@ class MLKEM768Manager:
             self.kyber_private_key = self.kem.export_secret_key()
             print("ML-KEM-768 keys generated successfully.")
 
-            # -----------------------------------------
 
             # Encrypt: encapsulate to get ciphertext and shared secret
             ciphertext, shared_secret = self.kem.encap_secret(self.kyber_public_key)
