@@ -6,6 +6,18 @@ Darkelf Browser is an original project developed by Dr. Kevin Moore. While inspi
 
 This project also used generative assistance (e.g., ChatGPT) during development for research, coding, and documentation — but all architecture, decisions, and final code are authored and reviewed by Dr. Moore.
 
+## Attribution by Edition
+
+This repository hosts multiple builds of Darkelf Browser. Attribution for external lists and tools varies by edition:
+
+### Standard Edition
+Includes:
+- EasyList & Fanboy Lists (CC BY-SA 4.0)
+- Disconnect.me Lists (CC BY-NC-SA 4.0 – non-commercial use only)
+
+### PQC Edition
+Does **not** include any third-party tracker or ad-blocking lists. All fingerprinting and privacy logic is implemented independently.
+
 ## Project Overview
 
 **Darkelf Browser PQC Edition v3.0**  
