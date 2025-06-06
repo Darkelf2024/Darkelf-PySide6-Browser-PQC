@@ -874,7 +874,7 @@ class CustomWebEnginePage(QWebEnginePage):
 
     def inject_all_scripts(self):
         self.inject_geolocation_override()
-        self.spoof_window_dimensions_tor_style()
+        self.spoof_window_dimensions_darkelf_style()
         self.apply_letterboxing_stealth()
         self.block_shadow_dom_inspection()
         self.block_tracking_requests()
@@ -1630,7 +1630,7 @@ class CustomWebEnginePage(QWebEnginePage):
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
 
-    def spoof_window_dimensions_tor_style(self):
+    def spoof_window_dimensions_darkelf_style(self):
         script = """
         (function () {
             // Force fixed dimensions that align with Tor's standard sizing buckets
