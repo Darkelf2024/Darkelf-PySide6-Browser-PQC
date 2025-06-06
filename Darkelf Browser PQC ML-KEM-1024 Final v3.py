@@ -420,7 +420,6 @@ class Kyber1024Manager:
             self.kyber_private_key = self.kem.export_secret_key()
             print("Kyber1024 keys generated successfully.")
 
-            # -----------------------------------------
 
             # Encrypt: encapsulate to get ciphertext and shared secret
             ciphertext, shared_secret = self.kem.encap_secret(self.kyber_public_key)
@@ -523,7 +522,7 @@ class PQCryptoAPI(QObject):
         except Exception as e:
             return f"Decryption failed: {str(e)}"
             
-# === Enhanced ML Detection & Integration for CustomWebEnginePage ===
+# === Enhanced ML Detection & Integration for CustomWebEnginePage === # Run Darkelf Script Classifier===
 class CustomWebEnginePage(QWebEnginePage):
     def __init__(self, parent=None):
         super().__init__(parent)
