@@ -72,7 +72,6 @@ import ctypes
 import math
 import oqs
 import socks
-import crypto_rust
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
@@ -758,6 +757,83 @@ class DownloadManager(QObject):
 
         except Exception as e:
             print(f"Failed to strip metadata from {file_path}: {e}")
+            
+# AIPrivacyManager: Fully integrated into CustomWebEnginePage context
+# Spoofs fingerprinting data dynamically using AI-generated personas
+# No imports or external dependencies required
+
+class DarkelfAIPrivacyManager:
+    def __init__(self, page):
+        self.page = page  # Expected to be instance of CustomWebEnginePage
+        self.persona = self._choose_persona()
+
+    def _choose_persona(self):
+        import random
+        personas = [
+            {
+                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:102.0) Gecko/20100101 Firefox/102.0",
+                "screen": (1366, 768),
+                "language": "en-US",
+                "timezone": "America/New_York"
+            },
+            {
+                "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+                "screen": (1920, 1080),
+                "language": "en-GB",
+                "timezone": "Europe/London"
+            },
+            {
+                "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15",
+                "screen": (1440, 900),
+                "language": "en-US",
+                "timezone": "America/Los_Angeles"
+            }
+        ]
+        return random.choice(personas)
+
+    def apply(self):
+        self._inject_user_agent()
+        self._inject_screen()
+        self._inject_language()
+        self._inject_timezone()
+
+    def _inject_user_agent(self):
+        ua = self.persona['userAgent']
+        js = f"""
+        Object.defineProperty(navigator, 'userAgent', {{ get: () => "{ua}" }});
+        Object.defineProperty(navigator, 'appVersion', {{ get: () => "{ua}" }});
+        Object.defineProperty(navigator, 'platform', {{ get: () => "Win32" }});
+        """
+        self.page.inject_script(js, injection_point=QWebEngineScript.DocumentCreation)
+
+    def _inject_screen(self):
+        w, h = self.persona['screen']
+        js = f"""
+        Object.defineProperty(window, 'innerWidth', {{ get: () => {w} }});
+        Object.defineProperty(window, 'innerHeight', {{ get: () => {h} }});
+        Object.defineProperty(screen, 'width', {{ get: () => {w} }});
+        Object.defineProperty(screen, 'height', {{ get: () => {h} }});
+        Object.defineProperty(screen, 'availWidth', {{ get: () => {w - 20} }});
+        Object.defineProperty(screen, 'availHeight', {{ get: () => {h - 40} }});
+        """
+        self.page.inject_script(js, injection_point=QWebEngineScript.DocumentCreation)
+
+    def _inject_language(self):
+        lang = self.persona['language']
+        js = f"""
+        Object.defineProperty(navigator, 'language', {{ get: () => '{lang}' }});
+        Object.defineProperty(navigator, 'languages', {{ get: () => ['{lang}', 'en'] }});
+        """
+        self.page.inject_script(js, injection_point=QWebEngineScript.DocumentCreation)
+
+    def _inject_timezone(self):
+        tz = self.persona['timezone']
+        js = f"""
+        Intl.DateTimeFormat.prototype.resolvedOptions = function() {{
+            return {{ timeZone: "{tz}" }};
+        }};
+        """
+        self.page.inject_script(js, injection_point=QWebEngineScript.DocumentCreation)
         
 class CustomWebEnginePage(QWebEnginePage):
     def __init__(self, browser, parent=None):
@@ -767,7 +843,9 @@ class CustomWebEnginePage(QWebEnginePage):
         self.profile = QWebEngineProfile.defaultProfile()
         self.profile.setHttpUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:78.0) Gecko/20100101 Firefox/78.0")
         self.inject_all_scripts()
-
+        self.privacy_ai = DarkelfAIPrivacyManager(self)
+        self.privacy_ai.apply()
+        
     def createWindow(self, _type):
         return self.browser.create_new_tab().page()
 
@@ -824,10 +902,16 @@ class CustomWebEnginePage(QWebEnginePage):
         self.spoof_storage_estimate()
         self.block_fontfaceset_api()
         self.block_idle_detector()
-        self.block_webauthn()
         self.spoof_language_headers()
         self.hide_webdriver_flag()
+        self.block_webauthn()
         self.patch_youtube_compatibility()
+        self.block_fedcm_api()
+        self.block_speech_synthesis()
+        self.clamp_performance_timers()
+        self.spoof_audio_fingerprint_response()
+        self.block_web_bluetooth()
+        self.block_cookie_banners()
         self.setup_csp()
 
     def inject_geolocation_override(self):
@@ -849,43 +933,211 @@ class CustomWebEnginePage(QWebEnginePage):
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
         
-    def patch_youtube_compatibility(self):
+    def block_cookie_banners(self):
         script = """
         (function() {
-            const hostname = window.location.hostname;
-            if (hostname.includes("youtube.com") || hostname.includes("ytimg.com")) {
-                // Restore AudioContext if it's been disabled
-                if (typeof AudioContext === 'undefined' && typeof window.webkitAudioContext !== 'undefined') {
-                    window.AudioContext = window.webkitAudioContext;
+            try {
+                const selectors = [
+                    '#cookie-banner',
+                    '#cookie-consent',
+                    '.cc-banner',
+                    '.cookie-consent',
+                    '.cookie-popup',
+                    '.cookie-notice',
+                    '[id*="cookie"]',
+                    '[class*="cookie"]'
+                ];
+
+                function removeCookieElements() {
+                    try {
+                        selectors.forEach(sel => {
+                            const elements = document.querySelectorAll(sel);
+                            elements.forEach(el => el.remove());
+                        });
+
+                        const denyButtons = Array.from(document.querySelectorAll('button, input[type="button"], a')).filter(el =>
+                            /\\b(reject|deny|refuse|disagree|decline)\\b/i.test(el.textContent || el.value)
+                        );
+
+                        denyButtons.forEach(btn => {
+                            try {
+                                btn.click();
+                            } catch (e) {}
+                        });
+                    } catch (e) {}
                 }
 
-                // Restore Permissions API to return fake prompt for camera/mic
-                if (navigator.permissions && navigator.permissions.query) {
-                    const originalQuery = navigator.permissions.query;
-                    navigator.permissions.query = function(param) {
-                        if (param.name === 'microphone' || param.name === 'camera') {
-                            return Promise.resolve({ state: 'denied' });
-                        }
-                        return originalQuery(param);
-                    };
-                }
+                requestIdleCallback(() => {
+                    removeCookieElements();
 
-                // Restore WebAuthn partially so login overlays don't break
-                if (!window.PublicKeyCredential) {
-                    window.PublicKeyCredential = function() {};
-                }
-
-                // Prevent autoplay restrictions from blocking playback
-                try {
-                    document.addEventListener("DOMContentLoaded", () => {
-                        const vids = document.querySelectorAll("video");
-                        vids.forEach(v => v.muted = true);  // mute for autoplay
+                    new MutationObserver(() => {
+                        requestIdleCallback(removeCookieElements);
+                    }).observe(document.documentElement || document.body, {
+                        childList: true,
+                        subtree: true
                     });
-                } catch (e) {}
+                });
+
+            } catch (err) {
+                console.warn("Cookie banner block failed:", err);
             }
         })();
         """
-        self.inject_script(script, injection_point=QWebEngineScript.DocumentReady)
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+
+    def block_webauthn(self):
+        script = """
+        (function() {
+            if (navigator.credentials) {
+                navigator.credentials.get = function() {
+                    return Promise.reject("WebAuthn disabled for security.");
+                };
+                navigator.credentials.create = function() {
+                    return Promise.reject("WebAuthn creation disabled.");
+                };
+            }
+            if (window.PublicKeyCredential) {
+                window.PublicKeyCredential = undefined;
+            }
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+        
+    def block_web_bluetooth(self):
+        script = """
+        (function() {
+            if ('bluetooth' in navigator) {
+                Object.defineProperty(navigator, 'bluetooth', {
+                    get: () => ({
+                        requestDevice: () => Promise.reject('Web Bluetooth disabled.')
+                    })
+                });
+            }
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+        
+    def block_speech_synthesis(self):
+        script = """
+        (function() {
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.getVoices = function() {
+                    return [];
+                };
+                Object.defineProperty(window, 'speechSynthesis', {
+                    get: () => ({
+                        getVoices: () => []
+                    })
+                });
+            }
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+        
+    def clamp_performance_timers(self):
+        script = """
+        (function() {
+            const originalNow = performance.now;
+            performance.now = function() {
+                return Math.floor(originalNow.call(performance) / 10) * 10;
+            };
+            const originalDateNow = Date.now;
+            Date.now = function() {
+                return Math.floor(originalDateNow() / 10) * 10;
+            };
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+        
+    def spoof_audio_fingerprint_response(self):
+        script = """
+        (function() {
+            const originalGetChannelData = AudioBuffer.prototype.getChannelData;
+            AudioBuffer.prototype.getChannelData = function() {
+                const data = originalGetChannelData.call(this);
+                const spoofed = new Float32Array(data.length);
+                for (let i = 0; i < data.length; i++) {
+                    spoofed[i] = 0.5;  // static waveform to defeat fingerprinting
+                }
+                return spoofed;
+            };
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+
+    def block_fedcm_api(self):
+        script = """
+        (function() {
+            if (navigator && 'identity' in navigator) {
+                navigator.identity = undefined;
+            }
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+        
+    def patch_youtube_compatibility(self):
+        script = """
+        (function() {
+            const override = () => {
+                const hostname = window.location.hostname;
+                if (hostname.includes("youtube.com") || hostname.includes("ytimg.com")) {
+
+                    // Restore AudioContext
+                    if (typeof AudioContext === 'undefined' && typeof webkitAudioContext !== 'undefined') {
+                        window.AudioContext = webkitAudioContext;
+                    }   
+
+                    // Fake Permissions API for mic/camera
+                    if (navigator.permissions && navigator.permissions.query) {
+                        const originalQuery = navigator.permissions.query.bind(navigator.permissions);
+                            navigator.permissions.query = function(param) {
+                            if (param && (param.name === 'microphone' || param.name === 'camera')) {
+                                return Promise.resolve({ state: 'denied' });
+                            }
+                            return originalQuery(param);
+                        };
+                    }
+
+                    // Stub WebAuthn
+                    if (!window.PublicKeyCredential) {
+                        window.PublicKeyCredential = function() {};
+                    }
+
+                    // Fingerprint resistance: spoof plugins and webdriver
+                    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [1, 2, 3], // fake plugin list
+                    });
+                    Object.defineProperty(navigator, 'languages', {
+                        get: () => ['en-US', 'en'],
+                    });
+
+                    // Force autoplay: mute video early
+                    const muteVideos = () => {
+                        const vids = document.querySelectorAll('video');
+                        vids.forEach(v => {
+                            v.muted = true;
+                            v.autoplay = true;
+                            v.playsInline = true;
+                            v.play().catch(() => {});
+                        });
+                    };
+                    document.addEventListener('DOMContentLoaded', muteVideos);
+                    setTimeout(muteVideos, 300); // backup
+
+                }
+            };
+
+            if (document.readyState === 'loading') {
+                document.addEventListener('readystatechange', () => {
+                    if (document.readyState === 'interactive') override();
+                });
+            } else {
+                override();
+            }
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
 
     def spoof_language_headers(self):
         script = """
@@ -906,24 +1158,6 @@ class CustomWebEnginePage(QWebEnginePage):
             Object.defineProperty(navigator, 'webdriver', {
                 get: () => false
             });
-        })();
-        """
-        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
-
-    def block_webauthn(self):
-        script = """
-        (function() {
-            if (navigator.credentials) {
-                navigator.credentials.get = function() {
-                    return Promise.reject("WebAuthn disabled for security.");
-                };
-                navigator.credentials.create = function() {
-                    return Promise.reject("WebAuthn creation disabled.");
-                };
-            }
-            if (window.PublicKeyCredential) {
-                window.PublicKeyCredential = undefined;
-            }
         })();
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
