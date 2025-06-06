@@ -1,10 +1,8 @@
-# Darkelf Browser – Attribution
+Darkelf Browser is an original software project developed by Dr. Kevin Moore.
 
-### Authorship
+The browser’s anti-fingerprinting engine (DarkelfAIPrivacyManager) implements original techniques tailored for the Darkelf environment. While conceptually informed by best practices and public research from tools such as Brave, Tor Browser, puppeteer-extra-plugin-stealth, and Librewolf, all code was independently written and adapted specifically for PySide6 and Qt WebEngine.
 
-Darkelf Browser is an original project developed by Dr. Kevin Moore. While inspired by best practices from privacy-respecting tools like Brave, Tor Browser, and Puppeteer stealth techniques, all fingerprinting countermeasures and cryptographic enhancements were independently implemented and customized for this application.
-
-This project also used generative assistance (e.g., ChatGPT) during development for research, coding, and documentation — but all architecture, decisions, and final code are authored and reviewed by Dr. Moore.
+This project also used generative assistance (e.g., ChatGPT) during development for research, prototype generation, and documentation. All architectural decisions, implementations, integrations, and final code were authored, reviewed, and curated by Dr. Moore.
 
 ## Attribution by Edition
 
