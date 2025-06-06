@@ -403,11 +403,9 @@ def debounce(func, wait):
     
 class HybridKEMX25519MLKEM1024:
     def __init__(self):
-        # X25519 keys
         self.x25519_private = PrivateKey.generate()
         self.x25519_public = self.x25519_private.public_key
 
-        # ML-KEM-1024 keys
         self.kem = oqs.KeyEncapsulation("ML-KEM-1024")
         self.mlkem_public_key = self.kem.generate_keypair()
         self.mlkem_private_key = self.kem.export_secret_key()
@@ -415,41 +413,27 @@ class HybridKEMX25519MLKEM1024:
         print("✅ Hybrid (X25519 + ML-KEM-1024) keys initialized.")
 
     def generate_shared_secret(self, peer_x25519_pub: bytes, peer_mlkem_ciphertext: bytes):
-        # X25519 shared secret
-        x_shared = self.x25519_private.exchange(PublicKey(peer_x25519_pub))
-
-        # ML-KEM shared secret
-        mlkem_shared = self.kem.decap_secret(peer_mlkem_ciphertext)
-
-        # Combine
-        return hashlib.sha3_256(x_shared + mlkem_shared).digest()
+        try:
+            x_shared = self.x25519_private.exchange(PublicKey(peer_x25519_pub))
+            mlkem_shared = self.kem.decap_secret(peer_mlkem_ciphertext)
+            return hashlib.sha3_256(x_shared + mlkem_shared).digest()
+        except Exception as e:
+            raise ValueError(f"[!] Shared secret generation failed: {e}")
 
     def encapsulate_for_peer(self, peer_mlkem_pub: bytes, peer_x25519_pub: bytes):
-        # ML-KEM encapsulation
-        kem = oqs.KeyEncapsulation("ML-KEM-1024")
-        kem.import_public_key(peer_mlkem_pub)
-        ciphertext, mlkem_shared = kem.encap_secret()
+        try:
+            kem = oqs.KeyEncapsulation("ML-KEM-1024")
+            kem.import_public_key(peer_mlkem_pub)
+            ciphertext, mlkem_shared = kem.encap_secret()
+            x_shared = self.x25519_private.exchange(PublicKey(peer_x25519_pub))
+            shared = hashlib.sha3_256(x_shared + mlkem_shared).digest()
 
-        # X25519 shared secret
-        x_shared = self.x25519_private.exchange(PublicKey(peer_x25519_pub))
-
-        # Combine
-        return {
-            "ciphertext": ciphertext,
-            "shared_secret": hashlib.sha3_256(x_shared + mlkem_shared).digest()
-        }
-
-    def export_public(self):
-        return {
-            "x25519_public": bytes(self.x25519_public),
-            "mlkem_public": self.mlkem_public_key
-        }
-
-    def export_private(self):
-        return {
-            "x25519_private": bytes(self.x25519_private),
-            "mlkem_private": self.mlkem_private_key
-        }
+            return {
+                "ciphertext": ciphertext,
+                "shared_secret": shared
+            }
+        except Exception as e:
+            raise ValueError(f"[!] Encapsulation failed: {e}")
 
     def export_public(self):
         return {
