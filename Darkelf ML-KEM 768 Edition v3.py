@@ -73,6 +73,9 @@ import math
 import oqs
 import socks
 import warnings
+import nacl.public
+from nacl.public import PrivateKey, PublicKey
+from nacl.exceptions import CryptoError
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 from PySide6.QtWebChannel import QWebChannel
