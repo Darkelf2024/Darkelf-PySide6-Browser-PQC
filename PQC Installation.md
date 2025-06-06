@@ -69,6 +69,7 @@ export CFLAGS="-I/opt/liboqs/include"
 ```bash
 pip install wheel
 pip install oqs PySide6 PySide6-WebEngine cryptography pycryptodome requests beautifulsoup4 adblockparser stem
+This is an example of installing manually - Refer to requirements.txt in Darkelf PQC Repo
 ```
 
 📅 If `oqs` fails to build, make sure your `liboqs` path is exported correctly (as above).
