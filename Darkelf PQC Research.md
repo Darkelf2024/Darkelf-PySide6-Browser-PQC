@@ -71,7 +71,7 @@ The browser disables a wide array of features:
 Users can retrain the JS malware classifier by running:
 
 ```bash
-python train_script_classifier.py
+python Darkelf_script_classifier.py
 ```
 
 This script performs feature extraction, model training, cross-validation, and updates the following:
