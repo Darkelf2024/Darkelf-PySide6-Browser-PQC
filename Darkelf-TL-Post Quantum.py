@@ -769,7 +769,7 @@ class DownloadManager(QObject):
         except Exception as e:
             print(f"Failed to strip metadata from {file_path}: {e}")
             
-# AIPrivacyManager: Fully integrated into CustomWebEnginePage context
+# DarkelfAIPrivacyManager: Fully integrated into CustomWebEnginePage context
 # Spoofs fingerprinting data dynamically using AI-generated personas
 # No imports or external dependencies required
 
