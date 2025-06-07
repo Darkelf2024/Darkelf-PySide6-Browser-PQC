@@ -68,7 +68,7 @@ Darkelf is available in two post-quantum variants:
 ## 🧪 ML Training & Retraining
 To regenerate the model:
 ```bash
-python train_script_classifier.py
+python Darkelf_script_classifier.py
 ```
 This script outputs:
 - `ml_script_classifier.pkl`
