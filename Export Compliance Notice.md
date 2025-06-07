@@ -30,7 +30,8 @@ The cryptographic functionality in this repository is classified under:
 Although this software is open-source and publicly available, users are responsible for ensuring compliance with all applicable **U.S. export laws and regulations**, including:
 
 - Not exporting or re-exporting the software to embargoed countries (e.g., Iran, North Korea, Syria)
-- Not providing the software to prohibited end-users or for prohibited end-uses under U.S. law
+- Not providing the software to individuals or entities on U.S. government restricted, denied, or debarred party lists
+- Not using the software for prohibited end-uses such as the development of weapons or other restricted military technologies
 
 ## Contact
 
