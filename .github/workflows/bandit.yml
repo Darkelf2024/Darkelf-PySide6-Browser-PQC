@@ -1,3 +1,4 @@
+# .github/workflows/bandit.yml
 name: Bandit Security Scan
 
 on:
@@ -9,24 +10,23 @@ on:
 jobs:
   bandit:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.x'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
 
-    - name: Install Bandit
-      run: pip install bandit
+      - name: Install Bandit
+        run: pip install bandit
 
-    - name: Run Bandit Scan
-      run: bandit -r . -f txt -o bandit-results.txt || true
+      - name: Run Bandit
+        run: bandit -r . -f txt -o bandit-results.txt || true
 
-    - name: Upload Bandit Report
-      uses: actions/upload-artifact@v4
-      with:
-        name: bandit-report
-        path: bandit-results.txt
+      - name: Upload Bandit Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-results.txt
+
