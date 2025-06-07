@@ -17,7 +17,7 @@ Please upgrade to the latest version to ensure you're receiving security fixes.
 We take security seriously. If you find a vulnerability, please:
 
 - **Do not open a public GitHub issue**
-- **Report it privately via email**: [security@darkelf2024.dev](mailto:security@darkelf2024.dev)
+- **Report it privately via email**: [@Darkelf2024]()
 
 ### 🔁 What to Expect:
 - ⏱️ We will acknowledge your report within **48 hours**
