@@ -1,19 +1,35 @@
-# Security Policy
+# 🔐 Security Policy
 
-## Supported Versions
+## 📦 Supported Versions
 
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
+The following versions of this project receive security updates:
 
-| Version | All Supported      |
+| Version | Supported          |
 | ------- | ------------------ |
-| 3.0.x   | :white_check_mark: |
+| 3.0.x   | ✅ Yes              |
 
+Please upgrade to the latest version to ensure you're receiving security fixes.
 
-## Reporting a Vulnerability
+---
 
-Use this section to tell people how to report a vulnerability.
+## 📣 Reporting a Vulnerability
 
-Tell them where to go, how often they can expect to get an update on a
-reported vulnerability, what to expect if the vulnerability is accepted or
-declined, etc.
+We take security seriously. If you find a vulnerability, please:
+
+- **Do not open a public GitHub issue**
+- **Report it privately via email**: [security@darkelf2024.dev](mailto:security@darkelf2024.dev)
+
+### 🔁 What to Expect:
+- ⏱️ We will acknowledge your report within **48 hours**
+- 🛠️ We aim to provide a fix or mitigation plan within **5 business days**
+- 🙏 We may credit you publicly (if you consent) after resolving the issue
+
+---
+
+## 🔒 Responsible Disclosure
+
+We strongly support responsible disclosure practices. Please give us time to respond and address the issue before publicly sharing any findings.
+
+---
+
+Thank you for helping make this project more secure!
