@@ -948,7 +948,7 @@ class CustomWebEnginePage(QWebEnginePage):
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
 
-     def _inject_font_protection(self):
+    def _inject_font_protection(self):
         js = """
         // Override measureText to return constant dimensions
         Object.defineProperty(CanvasRenderingContext2D.prototype, 'measureText', {
