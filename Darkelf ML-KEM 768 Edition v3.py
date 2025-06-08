@@ -922,6 +922,9 @@ class CustomWebEnginePage(QWebEnginePage):
         self.spoof_audio_fingerprint_response()
         self.block_web_bluetooth()
         self.block_cookie_banners()
+        self.block_webgpu_api()
+        self.harden_webworkers()
+        self.spoof_font_loading_checks()
         self.setup_csp()
 
     def inject_geolocation_override(self):
@@ -939,6 +942,52 @@ class CustomWebEnginePage(QWebEnginePage):
                     }
                 };
             }
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+
+    def spoof_font_loading_checks(self):
+        script = """
+        (function() {
+            const originalCheck = document.fonts.check;
+            document.fonts.check = function(...args) {
+                return true;
+            };
+            const originalLoad = document.fonts.load;
+            document.fonts.load = function(...args) {
+                return new Promise(resolve => {
+                    setTimeout(() => resolve(["Arial"]), Math.random() * 80 + 50);
+                });
+            };
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+        
+    def block_webgpu_api(self):
+        script = """
+        (function() {
+            Object.defineProperty(navigator, 'gpu', {
+                get: () => undefined
+            });
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+        
+    def harden_webworkers(self):
+        script = """
+        (function() {
+            const originalWorker = window.Worker;
+            window.Worker = new Proxy(originalWorker, {
+                construct(target, args) {
+                    try {
+                        if (args[0] instanceof Blob) {
+                            const codeURL = URL.createObjectURL(args[0]);
+                            return new target(codeURL);
+                        }
+                    } catch (e) {}
+                    return new target(...args);
+                }
+            });
         })();
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
