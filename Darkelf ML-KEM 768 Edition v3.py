@@ -890,7 +890,7 @@ class CustomWebEnginePage(QWebEnginePage):
         self.block_tracking_requests()
         self.protect_fingerprinting()
         self.spoof_canvas_api()
-        self.disable_webrtc()
+        self.stealth_webrtc_block()
         self.block_webrtc_sdp_logging()
         self.block_supercookies()
         self.block_etag_and_cache_tracking()
@@ -2044,68 +2044,49 @@ class CustomWebEnginePage(QWebEnginePage):
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
 
-    def disable_webrtc(self):
+    def stealth_webrtc_block(self):
         script = """
-        (function() {
-            const noop = function() { return null; };
-            const blockedProps = [
-                "RTCPeerConnection",
-                "webkitRTCPeerConnection",
-                "RTCDataChannel",
-                "RTCSessionDescription",
-                "RTCIceCandidate",
-                "MediaStream",
-                "MediaStreamTrack",
-                "MediaStreamEvent",
-                "RTCDataChannelEvent"
+        (() => {
+            const block = (target, key) => {
+                try {
+                    Object.defineProperty(target, key, {
+                        get: () => undefined,
+                        set: () => {},
+                        configurable: false
+                    });
+                    delete target[key];
+                } catch (e) {
+                    console.warn('[DarkelfAI] Block failed:', key, e);
+                }
+            };
+
+            const targets = [
+                [window, 'RTCPeerConnection'],
+                [window, 'webkitRTCPeerConnection'],
+                [window, 'mozRTCPeerConnection'],
+                [window, 'RTCDataChannel'],
+                [navigator, 'mozRTCPeerConnection'],
+                [navigator, 'mediaDevices']
             ];
 
-            // Assign noop and freeze each property
-            blockedProps.forEach(prop => {
-                try {
-                    if (window[prop]) {
-                        window[prop] = noop;
-                        Object.defineProperty(window, prop, {
-                            value: undefined,
-                            writable: false,
-                            configurable: false
-                        });
-                    }
-                } catch (e) {
-                    console.warn(`Failed to block ${prop}`, e);
-                }
-            });
+            targets.forEach(([obj, key]) => block(obj, key));
 
-            // Override getUserMedia
-            try {
-                if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-                    navigator.mediaDevices.getUserMedia = function() {
-                        return Promise.reject(new Error("WebRTC disabled"));
-                    };
+            // Iframe defense
+            new MutationObserver((muts) => {
+                for (const m of muts) {
+                    m.addedNodes.forEach((node) => {
+                        if (node.tagName === 'IFRAME') {
+                            try {
+                                const w = node.contentWindow;
+                                targets.forEach(([obj, key]) => block(w, key));
+                                targets.forEach(([obj, key]) => block(w.navigator, key));
+                            } catch (e) {}
+                        }
+                    });
                 }
-            } catch (e) {
-                console.warn("getUserMedia override failed:", e);
-            }
+            }).observe(document, { childList: true, subtree: true });
 
-            // Block WebRTC usage in iframes
-            try {
-                const originalCreateElement = Document.prototype.createElement;
-                Document.prototype.createElement = function(tag) {
-                    const element = originalCreateElement.call(this, tag);
-                    if (tag.toLowerCase() === "iframe") {
-                        const originalSetAttribute = element.setAttribute;
-                        element.setAttribute = function(attr, value) {
-                            if (attr === "src" && value && value.startsWith("http")) {
-                                console.warn("Blocking iframe WebRTC source:", value);
-                            }
-                            return originalSetAttribute.apply(this, arguments);
-                        };
-                    }
-                    return element;
-                };
-            } catch (e) {
-                console.warn("Iframe hook failed:", e);
-            }
+            console.log('[DarkelfAI] WebRTC APIs neutralized.');
         })();
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
