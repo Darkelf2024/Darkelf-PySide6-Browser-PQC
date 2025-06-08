@@ -925,6 +925,7 @@ class CustomWebEnginePage(QWebEnginePage):
         self.block_cookie_banners()
         self.block_webgpu_api()
         self.harden_webworkers()
+        self._inject_font_protection()
         self.spoof_font_loading_checks()
         self.setup_csp()
 
@@ -946,6 +947,48 @@ class CustomWebEnginePage(QWebEnginePage):
         })();
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+
+    def _inject_font_protection(self):
+        js = """
+        // Override measureText to return constant dimensions
+        Object.defineProperty(CanvasRenderingContext2D.prototype, 'measureText', {
+            value: function(text) {
+                return {
+                    width: 100,
+                    actualBoundingBoxLeft: 0,
+                    actualBoundingBoxRight: 100
+                };
+            },
+            configurable: true
+        });
+
+        // Spoof getComputedStyle to return constant font info
+        const originalGetComputedStyle = window.getComputedStyle;
+        window.getComputedStyle = function(...args) {
+            const style = originalGetComputedStyle.apply(this, args);
+            return new Proxy(style, {
+                get(target, prop) {
+                    if (typeof prop === 'string' && prop.toLowerCase().includes('font')) {
+                        return '16px Arial';
+                    }
+                    return target[prop];
+                }
+            });
+        };
+
+        // Normalize offsetWidth/offsetHeight
+        Object.defineProperty(HTMLElement.prototype, 'offsetWidth', {
+            get: function () { return 100; },
+            configurable: true
+        });
+        Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+            get: function () { return 20; },
+            configurable: true
+        });
+
+        console.log('[DarkelfAI] Font fingerprinting vectors spoofed.');
+        """
+        self.inject_script(js, injection_point=QWebEngineScript.DocumentCreation)
 
      def spoof_font_loading_checks(self):
         script = """
