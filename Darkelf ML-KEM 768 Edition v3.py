@@ -513,7 +513,7 @@ class MLKEM768Manager:
 class PQCryptoAPI(QObject):
     def __init__(self):
         super().__init__()
-        self.kyber = Kyber1024Manager()
+        self.kyber = MLKEM768Manager()
 
     @Slot(result=str)
     def generateKeyPair(self) -> str:
@@ -2177,7 +2177,7 @@ class CustomWebEnginePage(QWebEnginePage):
                     });
                     delete target[key];
                 } catch (e) {
-                    console.warn('[DarkelfAI] Block failed:', key, e);
+                    // Silently ignore expected errors (e.g. non-configurable)
                 }
             };
 
