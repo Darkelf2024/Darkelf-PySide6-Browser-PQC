@@ -2114,7 +2114,7 @@ class CustomWebEnginePage(QWebEnginePage):
                     });
                     delete target[key];
                 } catch (e) {
-                    console.warn('[DarkelfAI] Block failed:', key, e);
+                    // Silently ignore expected errors (e.g. non-configurable)
                 }
             };
 
