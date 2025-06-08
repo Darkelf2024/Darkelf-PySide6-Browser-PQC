@@ -924,7 +924,7 @@ class CustomWebEnginePage(QWebEnginePage):
         self.block_cookie_banners()
         self.block_webgpu_api()
         self.harden_webworkers()
-        self_inject_font_protection()
+        self._inject_font_protection()
         self.spoof_font_loading_checks()
         self.setup_csp()
 
