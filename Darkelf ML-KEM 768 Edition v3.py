@@ -994,51 +994,123 @@ class CustomWebEnginePage(QWebEnginePage):
         
     def block_cookie_banners(self):
         script = """
-        (function() {
-            try {
-                const selectors = [
-                    '#cookie-banner',
-                    '#cookie-consent',
-                    '.cc-banner',
-                    '.cookie-consent',
-                    '.cookie-popup',
-                    '.cookie-notice',
-                    '[id*="cookie"]',
-                    '[class*="cookie"]'
-                ];
+        (() => {
+            const selectors = [
+                '[id*="cookie"]',
+                '[class*="cookie"]',
+                '[aria-label*="cookie"]',
+                '[role="dialog"]',
+                '[role="alertdialog"]',
+                'div[class*="consent"]',
+                'div[class*="banner"]',
+                'div[class*="notice"]',
+                'div[class*="gdpr"]',
+                'div[class*="privacy"]',
+                'div[class*="optin"]'
+            ];
 
-                function removeCookieElements() {
-                    try {
-                        selectors.forEach(sel => {
-                            const elements = document.querySelectorAll(sel);
-                            elements.forEach(el => el.remove());
-                        });
+            const textTriggers = [
+                /cookie/i,
+                /consent/i,
+                /gdpr/i,
+                /privacy/i,
+                /we use/i,
+                /accept.*cookies/i,
+                /manage.*preferences/i,
+                /your.*choices/i
+            ];
 
-                        const denyButtons = Array.from(document.querySelectorAll('button, input[type="button"], a')).filter(el =>
-                            /\\b(reject|deny|refuse|disagree|decline)\\b/i.test(el.textContent || el.value)
-                        );
+            const buttonDenyRegex = /\\b(reject|deny|refuse|disagree|decline|only necessary|essential only)\\b/i;
 
-                        denyButtons.forEach(btn => {
-                            try {
-                                btn.click();
-                            } catch (e) {}
-                        });
-                    } catch (e) {}
+            function isCookieBanner(el) {
+                if (!el || !el.tagName) return false;
+                const txt = (el.textContent || '').trim().toLowerCase();
+                return textTriggers.some(re => re.test(txt));
+            }
+
+            function removeElement(el) {
+                try {
+                    el.remove?.();
+                    if (el.parentNode) el.parentNode.removeChild(el);
+                } catch (_) {}
+            }
+
+            function clickDenyButtons() {
+                try {
+                    const all = document.querySelectorAll('button, a, input[type="button"]');
+                    for (const el of all) {
+                        const txt = (el.textContent || el.value || '').toLowerCase();
+                        if (buttonDenyRegex.test(txt)) {
+                            el.click?.();
+                        }
+                    }
+                } catch (_) {}
+            }
+
+            function removeBanners() {
+                try {
+                    const all = new Set();
+
+                    for (const sel of selectors) {
+                        try {
+                            document.querySelectorAll(sel).forEach(el => {
+                                if (isCookieBanner(el)) all.add(el);
+                            });
+                        } catch (_) {}
+                    }
+
+                    for (const el of all) {
+                        removeElement(el);
+                    }
+
+                    clickDenyButtons();
+                } catch (_) {}
+            }
+
+            function shadowDOMScan(root) {
+                try {
+                    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null, false);
+                    while (walker.nextNode()) {
+                        const node = walker.currentNode;
+                        if (node.shadowRoot) {
+                            removeBanners(node.shadowRoot);
+                            shadowDOMScan(node.shadowRoot);
+                        }
+                    }
+                } catch (_) {}
+            }
+
+            function safeIdle(cb) {
+                if ('requestIdleCallback' in window) {
+                    requestIdleCallback(cb, { timeout: 300 });
+                } else {
+                    setTimeout(cb, 100);
                 }
+            }
 
-                requestIdleCallback(() => {
-                    removeCookieElements();
+            function harden() {
+                try {
+                    removeBanners();
+                    shadowDOMScan(document);
 
-                    new MutationObserver(() => {
-                        requestIdleCallback(removeCookieElements);
-                    }).observe(document.documentElement || document.body, {
+                    const observer = new MutationObserver(() => {
+                        safeIdle(() => {
+                            removeBanners();
+                            shadowDOMScan(document);
+                        });
+                    });
+
+                    observer.observe(document.documentElement, {
                         childList: true,
                         subtree: true
                     });
-                });
+                } catch (_) {}
+            }
 
-            } catch (err) {
-                console.warn("Cookie banner block failed:", err);
+            if (document.readyState === 'complete' || document.readyState === 'interactive') {
+                safeIdle(harden);
+            } else {
+                window.addEventListener('DOMContentLoaded', () => safeIdle(harden));
             }
         })();
         """
