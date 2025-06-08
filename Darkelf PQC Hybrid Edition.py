@@ -1580,7 +1580,7 @@ class CustomWebEnginePage(QWebEnginePage):
     def spoof_window_dimensions_darkelf_style(self):
         script = """
         (function () {
-            // Force fixed dimensions that align with Tor's standard sizing buckets
+            // Spoof fixed dimensions using Darkelf's privacy strategy (inspired by Tor-style size bucketing)
             const fixedWindow = {
                 innerWidth: 1000,
                 innerHeight: 1000,
