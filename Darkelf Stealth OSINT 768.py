@@ -77,6 +77,7 @@ import ctypes
 import math
 import oqs
 import socks
+import ssl
 import warnings
 import nacl.public
 from nacl.public import PrivateKey, PublicKey
@@ -126,6 +127,61 @@ import tempfile
 import psutil
 from PIL import Image
 import piexif
+
+class DarkelfTLSMonitor:
+    def __init__(self, sites):
+        self.sites = sites
+        self.fingerprints = {}
+        self.running = True
+        self.supported_profiles = ["chrome99", "chrome101", "chrome110", "safari15_5", "firefox"]
+
+    def rotate_profile(self):
+        return random.choice(self.supported_profiles)
+
+    def fetch_cert_fingerprint(self, hostname, port=443):
+        try:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+            sock = socks.socksocket()
+            sock.set_proxy(socks.SOCKS5, "127.0.0.1", 9052)
+            sock.settimeout(20)
+            sock.connect((hostname, port))
+
+            with context.wrap_socket(sock, server_hostname=hostname) as ssock:
+                cert = ssock.getpeercert(binary_form=True)
+                if cert:
+                    return hashlib.sha256(cert).hexdigest()
+        except Exception as e:
+            print(f"[DarkelfAI] ❌ TLS error for {hostname}: {e}")
+        return None
+
+    def monitor_loop(self):
+        while self.running:
+            profile = self.rotate_profile()
+            print(f"[DarkelfAI] 🔁 Rotating JA3 profile: {profile}")
+
+            for site in self.sites:
+                fp = self.fetch_cert_fingerprint(site)
+                if fp:
+                    if site not in self.fingerprints:
+                        self.fingerprints[site] = fp
+                        print(f"[DarkelfAI] 📌 Initial fingerprint for {site}: {fp}")
+                    elif self.fingerprints[site] != fp:
+                        print(f"[DarkelfAI] ⚠️ TLS certificate rotation detected for {site}")
+                        print(f"Old: {self.fingerprints[site]}")
+                        print(f"New: {fp}")
+                        self.fingerprints[site] = fp
+                    else:
+                        print(f"[DarkelfAI] ✅ No change in cert for {site}")
+                else:
+                    print(f"[DarkelfAI] ⚠️ No certificate available for {site}")
+
+            time.sleep(600)  # 10 minutes
+
+    def start(self):
+        threading.Thread(target=self.monitor_loop, daemon=True).start()
 
 class PhishingDetectorZeroTrace:
     """
@@ -2485,6 +2541,7 @@ class Darkelf(QMainWindow):
         self.setWindowTitle("Darkelf Browser")
         self.showMaximized()
         self.monitor_timer = None
+        self.mitmproxy_process = None
         
         # --- Synchronous ML-KEM 768 key manager ---
         self.kyber_manager = MLKEM768Manager(sync=False)
@@ -2506,6 +2563,8 @@ class Darkelf(QMainWindow):
         self.init_shortcuts()
 
         QTimer.singleShot(8000, self.start_forensic_tool_monitor)
+
+        self.start_mitmproxy_proxy
         
         # Fallback DNS resolution only if Tor is not working
         if self.tor_connection_failed():
@@ -2514,6 +2573,24 @@ class Darkelf(QMainWindow):
             self.resolve_domain_dot("cloudflare.com", "A")
         else:
             self.log_stealth("Tor active — fallback not triggered")
+
+    def start_mitmproxy_proxy(self):
+        try:
+            self.log_stealth("Starting mitmproxy with JA3 rotation...")
+            self.mitmproxy_process = subprocess.Popen([
+                "mitmdump",
+                "--mode", "socks5://127.0.0.1:9052",
+                "-s", os.path.join(os.path.dirname(__file__), "rotate_tls.py")
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            self.log_stealth(f"Failed to launch mitmproxy: {e}")
+
+    def close(self):
+        self.stop_tor()
+        if self.mitmproxy_process:
+            self.mitmproxy_process.terminate()
+            self.mitmproxy_process.wait()
+        super().close()
     
     def _init_stealth_log(self):
         try:
@@ -3848,6 +3925,13 @@ def main():
     # Initialize and show the browser
     darkelf_browser = Darkelf()
     darkelf_browser.show()
+
+    tls_monitor = DarkelfTLSMonitor([
+        "check.torproject.org",
+        "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion",
+        "example.com"
+    ])
+    tls_monitor.start()
 
     # Run the application
     sys.exit(app.exec())
