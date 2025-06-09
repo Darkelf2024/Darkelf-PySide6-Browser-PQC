@@ -3872,13 +3872,6 @@ def main():
     darkelf_browser = Darkelf()
     darkelf_browser.show()
 
-    tls_monitor = DarkelfTLSMonitor([
-        "check.torproject.org",
-        "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion",
-        "example.com"
-    ])
-    tls_monitor.start()
-
     # Run the application
     sys.exit(app.exec())
 
