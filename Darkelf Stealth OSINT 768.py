@@ -1046,7 +1046,7 @@ class CustomWebEnginePage(QWebEnginePage):
         """
         self.inject_script(js, injection_point=QWebEngineScript.DocumentCreation)
 
-     def spoof_font_loading_checks(self):
+    def spoof_font_loading_checks(self):
         script = """
         (function() {
             const originalCheck = document.fonts.check;
