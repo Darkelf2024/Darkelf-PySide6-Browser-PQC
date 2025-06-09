@@ -128,7 +128,7 @@ import psutil
 from PIL import Image
 import piexif
 
-# Please run rotate_tls.py = Need to run it only one time in your system - Please refer to Github Repo
+
 class PhishingDetectorZeroTrace:
     """
     Zero-trace phishing detection for Darkelf:
