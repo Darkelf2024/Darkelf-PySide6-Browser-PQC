@@ -2487,7 +2487,6 @@ class Darkelf(QMainWindow):
         self.setWindowTitle("Darkelf Browser")
         self.showMaximized()
         self.monitor_timer = None
-        self.mitmproxy_process = None
         
         # --- Synchronous ML-KEM 768 key manager ---
         self.kyber_manager = MLKEM768Manager(sync=False)
@@ -2510,7 +2509,6 @@ class Darkelf(QMainWindow):
 
         QTimer.singleShot(8000, self.start_forensic_tool_monitor)
 
-        self.start_mitmproxy_proxy
         
         # Fallback DNS resolution only if Tor is not working
         if self.tor_connection_failed():
@@ -2519,17 +2517,6 @@ class Darkelf(QMainWindow):
             self.resolve_domain_dot("cloudflare.com", "A")
         else:
             self.log_stealth("Tor active — fallback not triggered")
-
-    def start_mitmproxy_proxy(self):
-        try:
-            self.log_stealth("Starting mitmproxy with JA3 rotation...")
-            self.mitmproxy_process = subprocess.Popen([
-                "mitmdump",
-                "--mode", "socks5://127.0.0.1:9052",
-                "-s", os.path.join(os.path.dirname(__file__), "rotate_tls.py")
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception as e:
-            self.log_stealth(f"Failed to launch mitmproxy: {e}")
 
     def close(self):
         self.stop_tor()
