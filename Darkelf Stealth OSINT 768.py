@@ -129,61 +129,6 @@ from PIL import Image
 import piexif
 
 # Please run rotate_tls.py = Need to run it only one time in your system - Please refer to Github Repo
-class DarkelfTLSMonitor:
-    def __init__(self, sites):
-        self.sites = sites
-        self.fingerprints = {}
-        self.running = True
-        self.supported_profiles = ["chrome99", "chrome101", "chrome110", "safari15_5", "firefox"]
-
-    def rotate_profile(self):
-        return random.choice(self.supported_profiles)
-
-    def fetch_cert_fingerprint(self, hostname, port=443):
-        try:
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-
-            sock = socks.socksocket()
-            sock.set_proxy(socks.SOCKS5, "127.0.0.1", 9052)
-            sock.settimeout(20)
-            sock.connect((hostname, port))
-
-            with context.wrap_socket(sock, server_hostname=hostname) as ssock:
-                cert = ssock.getpeercert(binary_form=True)
-                if cert:
-                    return hashlib.sha256(cert).hexdigest()
-        except Exception as e:
-            print(f"[DarkelfAI] ❌ TLS error for {hostname}: {e}")
-        return None
-
-    def monitor_loop(self):
-        while self.running:
-            profile = self.rotate_profile()
-            print(f"[DarkelfAI] 🔁 Rotating JA3 profile: {profile}")
-
-            for site in self.sites:
-                fp = self.fetch_cert_fingerprint(site)
-                if fp:
-                    if site not in self.fingerprints:
-                        self.fingerprints[site] = fp
-                        print(f"[DarkelfAI] 📌 Initial fingerprint for {site}: {fp}")
-                    elif self.fingerprints[site] != fp:
-                        print(f"[DarkelfAI] ⚠️ TLS certificate rotation detected for {site}")
-                        print(f"Old: {self.fingerprints[site]}")
-                        print(f"New: {fp}")
-                        self.fingerprints[site] = fp
-                    else:
-                        print(f"[DarkelfAI] ✅ No change in cert for {site}")
-                else:
-                    print(f"[DarkelfAI] ⚠️ No certificate available for {site}")
-
-            time.sleep(600)  # 10 minutes
-
-    def start(self):
-        threading.Thread(target=self.monitor_loop, daemon=True).start()
-
 class PhishingDetectorZeroTrace:
     """
     Zero-trace phishing detection for Darkelf:
