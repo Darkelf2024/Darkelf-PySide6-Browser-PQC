@@ -2509,7 +2509,6 @@ class Darkelf(QMainWindow):
 
         QTimer.singleShot(8000, self.start_forensic_tool_monitor)
 
-        
         # Fallback DNS resolution only if Tor is not working
         if self.tor_connection_failed():
             self.log_stealth("Tor unavailable — using DoH/DoT fallback")
@@ -2517,13 +2516,6 @@ class Darkelf(QMainWindow):
             self.resolve_domain_dot("cloudflare.com", "A")
         else:
             self.log_stealth("Tor active — fallback not triggered")
-
-    def close(self):
-        self.stop_tor()
-        if self.mitmproxy_process:
-            self.mitmproxy_process.terminate()
-            self.mitmproxy_process.wait()
-        super().close()
     
     def _init_stealth_log(self):
         try:
