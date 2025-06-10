@@ -79,6 +79,7 @@ import oqs
 import socks
 import ssl
 import warnings
+import mmap
 import nacl.public
 from nacl.public import PrivateKey, PublicKey
 from nacl.exceptions import CryptoError
@@ -128,6 +129,65 @@ import psutil
 from PIL import Image
 import piexif
 import tls_client
+
+# 🔐 SecureBuffer + 🧠 MemoryMonitor (Embedded for Darkelf Browser)
+
+class SecureBuffer:
+    """
+    RAM-locked buffer using mmap + mlock to prevent swapping.
+    Use for sensitive in-memory data like session tokens, keys, etc.
+    """
+    def __init__(self, size=4096):
+        self.size = size
+        self.buffer = mmap.mmap(-1, self.size)
+
+        # Lock memory into RAM using mlock (macOS-compatible)
+        libc = ctypes.CDLL("libc.dylib")
+        result = libc.mlock(
+            ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.buffer))),
+            ctypes.c_size_t(self.size)
+        )
+        if result != 0:
+            raise RuntimeError("🔒 mlock failed: system may not allow locking memory")
+
+    def write(self, data: bytes):
+        self.buffer.seek(0)
+        self.buffer.write(data[:self.size])
+
+    def zero(self):
+        # Securely zero memory
+        ctypes.memset(
+            ctypes.addressof(ctypes.c_char.from_buffer(self.buffer)),
+            0,
+            self.size
+        )
+
+    def close(self):
+        self.zero()
+        self.buffer.close()
+
+
+class MemoryMonitor(threading.Thread):
+    """
+    Monitors system memory. If available memory falls below threshold,
+    exits the program to prevent swap usage and potential forensic leakage.
+    """
+    def __init__(self, threshold_mb=150, check_interval=5):
+        super().__init__(daemon=True)
+        self.threshold = threshold_mb * 1024 * 1024  # Convert MB to bytes
+        self.check_interval = check_interval
+        self._running = True
+
+    def run(self):
+        while self._running:
+            mem = psutil.virtual_memory()
+            if mem.available < self.threshold:
+                print("🔻 LOW MEMORY: < {} MB available. Exiting to prevent swap.".format(self.threshold // (1024 * 1024)))
+                sys.exit(1)
+            time.sleep(self.check_interval)
+
+    def stop(self):
+        self._running = False
 
 # Running DarkelfTLSJA3= Some Tor Onion Sites might be limited due to JA3 Rotation
 class DarkelfTLSMonitorJA3:
@@ -3741,7 +3801,7 @@ class Darkelf(QMainWindow):
             if os.path.exists(temp_subdir):
                 shutil.rmtree(temp_subdir, ignore_errors=True)
                 self.log_stealth(f"[✓] Securely deleted temp folder via rmtree: {temp_subdir}")
-
+                
             # Cryptographic keys
             for keyfile in ["private_key.pem", "ecdh_private_key.pem"]:
                 if os.path.exists(keyfile):
