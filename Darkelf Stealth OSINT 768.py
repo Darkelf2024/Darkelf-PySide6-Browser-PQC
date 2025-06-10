@@ -127,7 +127,82 @@ import tempfile
 import psutil
 from PIL import Image
 import piexif
+import tls_client
 
+class DarkelfTLSMonitorJA3:
+    def __init__(self, sites, interval=300):
+        self.sites = sites
+        self.interval = interval
+        self.fingerprints = {}
+        self.running = True
+
+        self.user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; rv:115.0) Gecko/20100101 Firefox/115.0",
+            "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:102.0) Gecko/20100101 Firefox/102.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 12.5; rv:113.0) Gecko/20100101 Firefox/113.0",
+            "Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:109.0) Gecko/20100101 Firefox/109.0",
+            "Mozilla/5.0 (X11; Linux x86_64; rv:108.0) Gecko/20100101 Firefox/108.0",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:106.0) Gecko/20100101 Firefox/106.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:104.0) Gecko/20100101 Firefox/104.0",
+            "Mozilla/5.0 (X11; Linux i686; rv:102.0) Gecko/20100101 Firefox/102.0",
+            "Mozilla/5.0 (Windows NT 6.3; WOW64; rv:101.0) Gecko/20100101 Firefox/101.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 11.2; rv:99.0) Gecko/20100101 Firefox/99.0"
+        ]
+
+        self.ja3_profiles = [
+            "chrome_110",
+            "chrome_112",
+            "chrome_114",
+            "firefox_102",
+            "firefox_108",
+            "safari_16_0"
+        ]
+
+    def rotate_headers(self):
+        return {
+            "User-Agent": random.choice(self.user_agents)
+        }
+
+    def rotate_ja3_session(self):
+        return tls_client.Session(
+            client_identifier=random.choice(self.ja3_profiles)
+        )
+
+    async def check_cert(self, site, headers):
+        try:
+            session = self.rotate_ja3_session()
+            response = session.get(
+                f"https://{site}",
+                headers=headers,
+                proxy="socks5://127.0.0.1:9052"  # Apply proxy per request
+            )
+
+            cert_hash = hashlib.sha256(response.url.encode()).hexdigest()
+
+            if site not in self.fingerprints:
+                print(f"[DarkelfAI] 📌 Initial fingerprint for {site}: {cert_hash}")
+                self.fingerprints[site] = cert_hash
+            elif self.fingerprints[site] != cert_hash:
+                print(f"[DarkelfAI] ⚠️ TLS CERT ROTATION for {site}")
+                print(f"Old: {self.fingerprints[site]}")
+                print(f"New: {cert_hash}")
+                self.fingerprints[site] = cert_hash
+            else:
+                print(f"[DarkelfAI] ✅ No change in cert for {site}")
+
+        except Exception as e:
+            print(f"[DarkelfAI] ❌ Error checking {site}: {e}")
+    
+    async def monitor_loop(self):
+        while self.running:
+            headers = self.rotate_headers()
+            print(f"[DarkelfAI] 🔁 Rotating User-Agent: {headers['User-Agent']}")
+            tasks = [self.check_cert(site, headers) for site in self.sites]
+            await asyncio.gather(*tasks)
+            await asyncio.sleep(self.interval)
+
+    def start(self):
+        threading.Thread(target=lambda: asyncio.run(self.monitor_loop()), daemon=True).start()
 
 class PhishingDetectorZeroTrace:
     """
@@ -790,14 +865,14 @@ class DarkelfAIPrivacyManager:
                 "timezone": "America/New_York"
             },
             {
-                "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:102.0) Gecko/20100101 Firefox/115.0",
                 "screen": (1920, 1080),
                 "language": "en-GB",
                 "timezone": "Europe/London"
             },
             {
-                "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15",
-                "screen": (1440, 900),
+                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:102.0) Gecko/20100101 Firefox/91.0",
+                "screen": (1600, 900),
                 "language": "en-US",
                 "timezone": "America/Los_Angeles"
             }
@@ -3774,6 +3849,18 @@ class HistoryDialog(QDialog):
         
         self.setLayout(layout)
 
+def start_tls_monitor():
+    monitored_sites = [
+        "check.torproject.org",
+        "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion",
+        "example.com"
+    ]
+    monitor = DarkelfTLSMonitorJA3(monitored_sites, interval=300)
+    monitor.start()  # Already runs in a background thread
+
+    # No infinite loop here — Qt is managing the main thread
+    print("[DarkelfAI] ✅ TLS Monitor started in background thread.")
+
 def main():
     # Apply correct High DPI scaling
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
@@ -3841,6 +3928,9 @@ def main():
         "--disable-javascript"
         "--incognito --disable-logging --no-first-run --disable-breakpad "
         "--disable-features=NetworkService,TranslateUI "
+        "--disable-client-side-phishing-detection "
+        "--disable-features=UserAgentClientHint,PrefetchPrivacyChanges,FetchMetadata "
+        "--no-zygote --single-process "
         "--disk-cache-dir=/dev/null"
     )
     
@@ -3851,11 +3941,11 @@ def main():
     darkelf_browser = Darkelf()
     darkelf_browser.show()
 
-    # Run the application
+    # Start TLS monitor after 10s delay to allow Tor to fully bootstrap
+    QTimer.singleShot(20000, start_tls_monitor)
+
+    # Start the Qt event loop
     sys.exit(app.exec())
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
-
-
-
