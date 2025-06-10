@@ -127,6 +127,79 @@ import psutil
 from PIL import Image
 import piexif
 
+# Please make sure you have SIP Disabled on MacOS M1-M4
+class DarkelfKernelMonitor(threading.Thread):
+    """
+    Monitors system kernel state for swap activity, paging daemon, and config changes.
+    Alerts on forensic-risk events like swap reactivation or mid-session kernel tampering.
+    """
+
+    def __init__(self, check_interval=5):
+        super().__init__(daemon=True)
+        self.check_interval = check_interval
+        self.initial_fingerprint = self.system_fingerprint()
+        self._last_swap_active = None
+        self._last_pager_state = None
+        self._last_fingerprint_hash = hash(str(self.initial_fingerprint))
+
+    def run(self):
+        while True:
+            time.sleep(self.check_interval)
+
+            # Check for swap
+            swap_now = self.swap_active()
+            if swap_now != self._last_swap_active:
+                if swap_now:
+                    print("❌ [DarkelfKernelMonitor] Swap is ACTIVE — memory may be paged to disk!")
+                else:
+                    print("✅ [DarkelfKernelMonitor] Swap is OFF")
+                self._last_swap_active = swap_now
+
+            # Check for dynamic_pager
+            pager_now = self.dynamic_pager_running()
+            if pager_now != self._last_pager_state:
+                if pager_now:
+                    print("❌ [DarkelfKernelMonitor] dynamic_pager is RUNNING — swap management enabled!")
+                else:
+                    print("✅ [DarkelfKernelMonitor] dynamic_pager is not running")
+                self._last_pager_state = pager_now
+
+            # Check for system fingerprint tampering
+            current_fingerprint = self.system_fingerprint()
+            if hash(str(current_fingerprint)) != self._last_fingerprint_hash:
+                print("⚠️ [DarkelfKernelMonitor] Kernel config changed mid-session — possible tampering!")
+                self._last_fingerprint_hash = hash(str(current_fingerprint))
+
+    def swap_active(self):
+        try:
+            output = subprocess.check_output(['sysctl', 'vm.swapusage'], stderr=subprocess.DEVNULL).decode()
+            return "used = 0.00M" not in output
+        except Exception:
+            return False
+
+    def dynamic_pager_running(self):
+        try:
+            output = subprocess.check_output(['ps', 'aux'], stderr=subprocess.DEVNULL).decode().lower()
+            return "dynamic_pager" in output
+        except Exception:
+            return False
+
+    def system_fingerprint(self):
+        keys = [
+            "kern.osrevision",
+            "kern.osversion",
+            "kern.bootargs",
+            "vm.swapusage"
+        ]
+        results = {}
+        for key in keys:
+            try:
+                val = subprocess.check_output(['sysctl', key], stderr=subprocess.DEVNULL).decode().strip()
+                results[key] = val
+            except Exception:
+                results[key] = "ERROR"
+        return results
+
 # 🔐 SecureBuffer + 🧠 MemoryMonitor (Embedded for Darkelf Browser)
 
 class SecureBuffer:
@@ -3853,6 +3926,9 @@ def main():
         "--disable-features=NetworkService,TranslateUI "
         "--disk-cache-dir=/dev/null"
     )
+    # Start kernel state monitor
+    kernel_monitor = DarkelfKernelMonitor(check_interval=5)
+    kernel_monitor.start()
     
     # Create the application
     app = QApplication.instance() or QApplication(sys.argv)
