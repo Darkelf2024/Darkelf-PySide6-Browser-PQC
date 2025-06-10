@@ -3636,7 +3636,7 @@ class Darkelf(QMainWindow):
                 if os.path.exists(keyfile):
                     self.secure_delete(keyfile)
 
-            # --- Begin: ML-KEM 1024 (Kyber) key memory and file wipe ---
+            # --- Begin: ML-KEM 768 (Kyber) key memory and file wipe ---
             try:
                 if hasattr(self, 'kyber_manager') and self.kyber_manager:
                     # Overwrite private key in memory
