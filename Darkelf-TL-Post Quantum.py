@@ -3703,6 +3703,42 @@ class Darkelf(QMainWindow):
                 if os.path.exists(keyfile):
                     self.secure_delete(keyfile)
 
+            # --- Begin: ML-KEM 768 (Kyber) key memory and file wipe ---
+            try:
+                if hasattr(self, 'kyber_manager') and self.kyber_manager:
+                    # Overwrite private key in memory
+                    if hasattr(self.kyber_manager, 'kyber_private_key') and self.kyber_manager.kyber_private_key:
+                        priv = self.kyber_manager.kyber_private_key
+                        if isinstance(priv, (bytearray, bytes)):
+                            try:
+                                for i in range(len(priv)):
+                                    if isinstance(priv, bytearray):
+                                        priv[i] = 0
+                            except Exception:
+                                pass
+                        self.kyber_manager.kyber_private_key = None
+                    # Overwrite public key in memory
+                    if hasattr(self.kyber_manager, 'kyber_public_key') and self.kyber_manager.kyber_public_key:
+                        pub = self.kyber_manager.kyber_public_key
+                        if isinstance(pub, (bytearray, bytes)):
+                            try:
+                                for i in range(len(pub)):
+                                    if isinstance(pub, bytearray):
+                                        pub[i] = 0
+                            except Exception:
+                                pass
+                        self.kyber_manager.kyber_public_key = None
+                    self.kyber_manager.kem = None
+
+                # Secure erase Kyber key files if ever saved
+                for kyber_file in ["kyber_private.key", "kyber_public.key"]:
+                    if os.path.exists(kyber_file):
+                        self.secure_delete(kyber_file)
+            except Exception as e:
+                if hasattr(self, 'log_path') and os.path.exists(self.log_path):
+                    self.log_stealth(f"Error wiping ML-KEM keys: {e}")
+            # --- End: ML-KEM 1024 key wipe ---
+
             # Final: log
             if hasattr(self, 'log_path') and os.path.exists(self.log_path):
                 self.secure_delete(self.log_path)
