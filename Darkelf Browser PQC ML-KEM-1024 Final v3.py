@@ -3628,11 +3628,12 @@ class Darkelf(QMainWindow):
             # Clean RAM-based directory
             if hasattr(self, 'ram_path') and os.path.exists(self.ram_path):
                 self.secure_delete_ram_disk_directory(self.ram_path)
-
+                
             # Clean temp folder
             temp_subdir = os.path.join(tempfile.gettempdir(), "darkelf_temp")
             if os.path.exists(temp_subdir):
-                self.secure_delete_directory(temp_subdir)
+                shutil.rmtree(temp_subdir, ignore_errors=True)
+                self.log_stealth(f"[✓] Securely deleted temp folder via rmtree: {temp_subdir}")
 
             # Cryptographic keys
             for keyfile in ["private_key.pem", "ecdh_private_key.pem"]:
