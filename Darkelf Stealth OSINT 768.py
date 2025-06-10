@@ -129,6 +129,7 @@ from PIL import Image
 import piexif
 import tls_client
 
+# Running DarkelfTLSJA3= Some Tor Onion Sites might be limited due to JA3 Rotation
 class DarkelfTLSMonitorJA3:
     def __init__(self, sites, interval=300):
         self.sites = sites
@@ -150,12 +151,16 @@ class DarkelfTLSMonitorJA3:
         ]
 
         self.ja3_profiles = [
-            "chrome_110",
-            "chrome_112",
-            "chrome_114",
+            "firefox_92",
+            "firefox_95",
+            "firefox_98",
+            "firefox_100",
             "firefox_102",
+            "firefox_105",
+            "firefox_106",
             "firefox_108",
-            "safari_16_0"
+            "firefox_110",
+            "firefox_115"
         ]
 
     def rotate_headers(self):
