@@ -788,14 +788,14 @@ class DarkelfAIPrivacyManager:
                 "timezone": "America/New_York"
             },
             {
-                "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:102.0) Gecko/20100101 Firefox/115.0",
                 "screen": (1920, 1080),
                 "language": "en-GB",
                 "timezone": "Europe/London"
             },
             {
-                "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15",
-                "screen": (1440, 900),
+                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:102.0) Gecko/20100101 Firefox/91.0",
+                "screen": (1600, 900),
                 "language": "en-US",
                 "timezone": "America/Los_Angeles"
             }
