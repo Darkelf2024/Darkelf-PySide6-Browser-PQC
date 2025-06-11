@@ -130,12 +130,14 @@ import piexif
 class DarkelfKernelMonitor(threading.Thread):
     """
     Monitors system kernel state for swap activity, paging daemon, and config changes.
-    Alerts on forensic-risk events like swap reactivation or mid-session kernel tampering.
+    Responds to forensic-risk events like swap reactivation or kernel tampering by
+    shutting down the app and cleaning swap.
     """
 
-    def __init__(self, check_interval=5):
+    def __init__(self, check_interval=5, parent_app=None):
         super().__init__(daemon=True)
         self.check_interval = check_interval
+        self.parent_app = parent_app  # reference to Darkelf's QApplication or main window
         self.initial_fingerprint = self.system_fingerprint()
         self._last_swap_active = None
         self._last_pager_state = None
@@ -150,6 +152,9 @@ class DarkelfKernelMonitor(threading.Thread):
             if swap_now != self._last_swap_active:
                 if swap_now:
                     print("❌ [DarkelfKernelMonitor] Swap is ACTIVE — memory may be paged to disk!")
+                    self.kill_dynamic_pager()
+                    self.secure_delete_swap()
+                    self.shutdown_darkelf()
                 else:
                     print("✅ [DarkelfKernelMonitor] Swap is OFF")
                 self._last_swap_active = swap_now
@@ -166,7 +171,7 @@ class DarkelfKernelMonitor(threading.Thread):
             # Check for system fingerprint tampering
             current_fingerprint = self.system_fingerprint()
             if hash(str(current_fingerprint)) != self._last_fingerprint_hash:
-                print("⚠️ [DarkelfKernelMonitor] Kernel config changed mid-session — possible tampering!")
+                print("⚠️ [DarkelfKernelMonitor] Kernel config changed mid-session — possible swap ACTIVE!")
                 self._last_fingerprint_hash = hash(str(current_fingerprint))
 
     def swap_active(self):
@@ -182,6 +187,27 @@ class DarkelfKernelMonitor(threading.Thread):
             return "dynamic_pager" in output
         except Exception:
             return False
+
+    def kill_dynamic_pager(self):
+        try:
+            subprocess.run(["sudo", "launchctl", "bootout", "system", "/System/Library/LaunchDaemons/com.apple.dynamic_pager.plist"], check=True)
+            print("🔒 [DarkelfKernelMonitor] dynamic_pager disabled")
+        except subprocess.CalledProcessError:
+            print("⚠️ [DarkelfKernelMonitor] Failed to disable dynamic_pager")
+
+    def secure_delete_swap(self):
+        try:
+            subprocess.run(["sudo", "rm", "-f", "/private/var/vm/swapfile*"], check=True)
+            print("🧨 [DarkelfKernelMonitor] Swap files removed")
+        except Exception as e:
+            print(f"⚠️ [DarkelfKernelMonitor] Failed to remove swapfiles: {e}")
+
+    def shutdown_darkelf(self):
+        print("💣 [DarkelfKernelMonitor] Closing Darkelf app due to swap activation...")
+        if self.parent_app:
+            self.parent_app.quit()
+        else:
+            os.kill(os.getpid(), signal.SIGTERM)
 
     def system_fingerprint(self):
         keys = [
