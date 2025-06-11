@@ -188,7 +188,7 @@ class DarkelfKernelMonitor(threading.Thread):
         keys = [
             "kern.osrevision",
             "kern.osversion",
-            "kern.bootargs",
+            "kern.bootargs"
         ]
         results = {}
         for key in keys:
