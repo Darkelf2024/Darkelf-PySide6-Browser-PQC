@@ -189,7 +189,6 @@ class DarkelfKernelMonitor(threading.Thread):
             "kern.osrevision",
             "kern.osversion",
             "kern.bootargs",
-            "vm.swapusage"
         ]
         results = {}
         for key in keys:
