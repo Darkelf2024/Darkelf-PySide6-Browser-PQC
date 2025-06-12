@@ -80,6 +80,7 @@ import socks
 import ssl
 import warnings
 import mmap
+import signal
 import nacl.public
 from nacl.public import PrivateKey, PublicKey
 from nacl.exceptions import CryptoError
@@ -210,7 +211,7 @@ class DarkelfKernelMonitor(threading.Thread):
     def shutdown_darkelf(self):
         print("💣 [DarkelfKernelMonitor] Closing Darkelf app due to swap activation...")
         if self.parent_app:
-            self.parent_app.quit()
+            QTimersingleShot(0, self.parent_app.quit)
         else:
             os.kill(os.getpid(), signal.SIGTERM)
 
