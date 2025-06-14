@@ -1,6 +1,9 @@
 # .github/workflows/bandit.yml
 name: Bandit Security Scan
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [ main ]
