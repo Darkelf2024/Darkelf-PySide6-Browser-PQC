@@ -200,12 +200,12 @@ class DarkelfTLSMonitorJA3:
 
         self.user_agents = [
             "Mozilla/5.0 (Windows NT 10.0; rv:115.0) Gecko/20100101 Firefox/115.0",
-            "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:102.0) Gecko/20100101 Firefox/95.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 12.5; rv:113.0) Gecko/20100101 Firefox/100.0",
-            "Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:109.0) Gecko/20100101 Firefox/98.0",
+            "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:95.0) Gecko/20100101 Firefox/95.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 12.5; rv:100.0) Gecko/20100101 Firefox/100.0",
+            "Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:98.0) Gecko/20100101 Firefox/98.0",
             "Mozilla/5.0 (X11; Linux x86_64; rv:108.0) Gecko/20100101 Firefox/78.0",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:106.0) Gecko/20100101 Firefox/92.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:104.0) Gecko/20100101 Firefox/102.0",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:92.0) Gecko/20100101 Firefox/92.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:102.0) Gecko/20100101 Firefox/102.0",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 11.2; rv:99.0) Gecko/20100101 Firefox/99.0"
         ]
         self.ja3_profiles = [
@@ -992,19 +992,19 @@ class DarkelfAIPrivacyManager:
         import random
         personas = [
             {
-                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:78.0) Gecko/20100101 Firefox/102.0",
+                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:102.0) Gecko/20100101 Firefox/102.0",
                 "screen": (1366, 768),
                 "language": "en-US",
                 "timezone": "America/New_York"
             },
             {
-                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:78.0) Gecko/20100101 Firefox/115.0",
+                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:115.0) Gecko/20100101 Firefox/115.0",
                 "screen": (1920, 1080),
                 "language": "en-GB",
                 "timezone": "Europe/London"
             },
             {
-                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:78.0) Gecko/20100101 Firefox/91.0",
+                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:91.0) Gecko/20100101 Firefox/91.0",
                 "screen": (1600, 900),
                 "language": "en-US",
                 "timezone": "America/Los_Angeles"
@@ -4171,7 +4171,7 @@ def main():
         "--disable-features=UserAgentClientHint,ClientHints,UserAgentReduction "
         "--disable-features=NetworkService,PrefetchPrivacyChanges "
         "--force-major-version-to-minor "  # Sends random or shifted UA strings
-        "--user-agent=\"Mozilla/5.0 (X11; Linux x86_64; rv:102.0) Gecko/20100101 Firefox/78.0 "
+        "--user-agent=\"Mozilla/5.0 (X11; Linux x86_64; rv:78.0) Gecko/20100101 Firefox/78.0 "
         "--disable-http=cache "
         '--proxy-server="http://127.0.0.1:8080"'
         "--disk-cache-dir=/dev/null"
