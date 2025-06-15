@@ -3,8 +3,8 @@
 ## Overview
 **Darkelf Browser** is a hardened, privacy-first secure browser developed for investigative journalists, activists, penetration testers, and advanced security professionals. Designed to combat advanced persistent threats, it incorporates **post-quantum cryptography**, live JavaScript malware detection via machine learning, and memory-resident anti-forensics.
 
-Darkelf Vault Browser PyQt5, What's blocked Everything! 
-PySide6: Working on Patch Script to fix sec cha ua n http2 
+- Darkelf Vault Browser PyQt5, What's blocked Everything! 
+- PySide6: Working on Patch Script to fix sec cha ua n http2 
 
 Darkelf Vault Browser uses PyQt5 Super Stealth - Head to other Repo
 
