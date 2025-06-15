@@ -128,7 +128,8 @@ import psutil
 from PIL import Image
 import piexif
 
-# Please make sure you have SIP Disabled on MacOS M1-M4
+# Please make sure you have SIP & Swap Disabled on MacOS M1-M4 - Users can delete the Kernel Monitor Class and from def Main - Kernel Monitor Start at bottom but you will have minimal disk writes etc. 
+# To run this browser - It's important to know you'll need 16gb ram no swap issues. 
 class DarkelfKernelMonitor(threading.Thread):
     """
     Monitors system kernel state for swap activity, paging daemon, and config changes.
