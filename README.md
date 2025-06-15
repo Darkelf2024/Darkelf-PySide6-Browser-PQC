@@ -3,6 +3,25 @@
 ## Overview
 **Darkelf Browser** is a hardened, privacy-first secure browser developed for investigative journalists, activists, penetration testers, and advanced security professionals. Designed to combat advanced persistent threats, it incorporates **post-quantum cryptography**, live JavaScript malware detection via machine learning, and memory-resident anti-forensics.
 
+Darkelf Vault Browser PyQt5, What's blocked Everything! 
+PySide6: Working on Patch Script to fix sec cha ua n http2 
+
+Darkelf Vault Browser uses PyQt5 Super Stealth - Head to other Repo
+
+Tor Letterboxing
+Firefox Headers Cipher Suites
+No Leaks
+No Fingerprints
+No http2
+No sec cha ua headers
+TLS Rotations
+Super Stealth
+Post Quantum Encrypted Messaging Coming!
+TLS utilizes X25519/Post Quantum Logic, Ai, PQCryptApi
+Darkelf Vault PyQt5: This browser uses ML-KEM-768 for encrypted messaging key storage and secure buffer operations. TLS traffic remains X25519-based due to current web standard constraints!
+
+Download Here Darkelf Vault Browser This doesn't have the Kernel Monitor Integration!
+
 Built on a fortified QtWebEngine base, Darkelf ensures no disk persistence, disables swap, and isolates all sessions in hardened runtime environments. Please refer to [Disable Swap Guide](https://github.com/Darkelf2024/Darkelf-Browser-v3-PQC/blob/main/disable_swap_macos_guide.md)
 
 ## 🧬 Post-Quantum Editions
