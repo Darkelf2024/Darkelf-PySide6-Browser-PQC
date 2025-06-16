@@ -147,7 +147,7 @@ from PyQt5.QtCore import (
 
 class HeaderInterceptor(QWebEngineUrlRequestInterceptor):
     def interceptRequest(self, info):
-        # Spoofed or poisoned headers
+        # Spoofed or poisoned headers this applies to PySide6 Post Quantum not Darkelf Vault
         poison_headers = {
             b'referer': b'null',
             b'user-agent': b'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:102.0) Gecko/20100101 Firefox/102.0',
