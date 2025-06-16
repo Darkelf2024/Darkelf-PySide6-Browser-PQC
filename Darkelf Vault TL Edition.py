@@ -338,26 +338,25 @@ class MemoryMonitor(threading.Thread):
 
 class PhishingDetectorZeroTrace:
     """
-    Zero-trace phishing detection for Darkelf:
-    - No logging
-    - No disk writes
-    - In-memory heuristics only
-    - No LLM, no network
+    Post-Quantum phishing detector with:
+    - In-memory PQ-encrypted logs
+    - No logging to disk until shutdown (if authorized)
+    - No network or LLM usage
     """
 
-    def __init__(self):
+    def __init__(self, pq_logger=None, flush_path="phishing_log.txt"):
         self.static_blacklist = {
             "paypal-login-security.com",
             "update-now-secure.net",
             "signin-account-verification.info"
         }
-
         self.suspicious_keywords = {
             "login", "verify", "secure", "account", "bank", "update", "signin", "password"
         }
-
         self.ip_pattern = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
-        self.session_flags = set()  # ephemeral, cleared on restart
+        self.session_flags = set()
+        self.pq_logger = pq_logger
+        self.flush_path = flush_path
 
     def is_suspicious_url(self, url):
         try:
@@ -367,27 +366,27 @@ class PhishingDetectorZeroTrace:
             url_hash = self._hash_url(url)
 
             if url_hash in self.session_flags:
-                return True, "Previously flagged during session."
+                return self._log_and_flag(url, "Previously flagged during session.")
 
             if host in self.static_blacklist:
-                return True, f"Domain '{host}' is in static blacklist."
+                return self._log_and_flag(url, f"Domain '{host}' is in static blacklist.")
 
             if self.ip_pattern.match(host):
-                return True, "URL uses IP address directly."
+                return self._log_and_flag(url, "URL uses IP address directly.")
 
             if host.count('.') > 3:
-                return True, "Too many subdomains."
+                return self._log_and_flag(url, "Too many subdomains.")
 
             for keyword in self.suspicious_keywords:
                 if keyword in host:
-                    return True, f"Contains suspicious keyword: '{keyword}'."
+                    return self._log_and_flag(url, f"Contains suspicious keyword: '{keyword}'.")
 
             return False, "URL appears clean."
 
         except Exception as e:
-            return True, f"URL parsing error: {str(e)}"
+            return self._log_and_flag(url, f"URL parsing error: {str(e)}")
 
-    def analyze_page_content(self, html):
+    def analyze_page_content(self, html, url="(unknown)"):
         try:
             lowered = html.lower()
             score = 0
@@ -397,14 +396,23 @@ class PhishingDetectorZeroTrace:
                 score += 1
             if "<iframe" in lowered or "hidden input" in lowered:
                 score += 1
+
             if score >= 2:
-                return True, "Suspicious elements found in page."
+                return self._log_and_flag(url, "Suspicious elements found in page.")
             return False, "Content appears clean."
-        except Exception:
-            return False, "Content scan error."
+        except Exception as e:
+            return self._log_and_flag(url, f"Content scan error: {str(e)}")
 
     def flag_url_ephemeral(self, url):
         self.session_flags.add(self._hash_url(url))
+
+    def _log_and_flag(self, url, reason):
+        if self.pq_logger:
+            timestamp = datetime.utcnow().isoformat()
+            message = f"[{timestamp}] PHISHING - {url} | {reason}"
+            self.pq_logger.log_to_memory(message)
+        self.flag_url_ephemeral(url)
+        return True, reason
 
     def _hash_url(self, url):
         return hashlib.sha256(url.encode()).hexdigest()
@@ -417,7 +425,16 @@ class PhishingDetectorZeroTrace:
         msg.setInformativeText(reason)
         msg.setStandardButtons(QMessageBox.Ok)
         msg.exec()
-        
+
+    def flush_logs_on_exit(self):
+        if self.pq_logger:
+            try:
+                self.pq_logger.authorize_flush("darkelf-confirm")
+                self.pq_logger.flush_log(path=self.flush_path)
+                print(f"[PhishingDetector] ✅ Flushed encrypted phishing log to {self.flush_path}")
+            except Exception as e:
+                print(f"[PhishingDetector] ⚠️ Log flush failed: {e}")
+
 class SecureCryptoUtils:
     @staticmethod
     def derive_key(password: bytes, salt: bytes) -> bytes:
@@ -431,23 +448,48 @@ class SecureCryptoUtils:
         )
         return base64.urlsafe_b64encode(kdf.derive(password))
 
-class StealthCovertOps:
+class StealthCovertOpsPQ:
     def __init__(self, stealth_mode=True):
         self._log_buffer = []
-        self._salt = secrets.token_bytes(16)
-        self._log_key = SecureCryptoUtils.derive_key(b"darkelf_master_key", self._salt)
         self._stealth_mode = stealth_mode
         self._authorized = False
-        self._cipher = Fernet(self._log_key)
 
-    def encrypt(self, data: str) -> str:
-        return self._cipher.encrypt(data.encode()).decode()
+        # === ML-KEM-768: Post-Quantum Key Exchange ===
+        self.kem = oqs.KeyEncapsulation("ML-KEM-768")
+        self.public_key = self.kem.generate_keypair()
+        self.private_key = self.kem.export_secret_key()
 
-    def decrypt(self, enc_data: str) -> str:
-        return self._cipher.decrypt(enc_data.encode()).decode()
+        # Derive shared secret using encapsulation
+        self.ciphertext, self.shared_secret = self.kem.encap_secret(self.public_key)
+
+        # Derive AES-256 key from shared secret
+        self.salt = os.urandom(16)
+        self.aes_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=self.salt,
+            info=b"mlkem768_log_key"
+        ).derive(self.shared_secret)
+
+        self.aesgcm = AESGCM(self.aes_key)
+
+    def encrypt(self, message: str) -> str:
+        nonce = os.urandom(12)
+        ciphertext = self.aesgcm.encrypt(nonce, message.encode(), None)
+        blob = {
+            "nonce": base64.b64encode(nonce).decode(),
+            "cipher": base64.b64encode(ciphertext).decode()
+        }
+        return json.dumps(blob)
+
+    def decrypt(self, blob_str: str) -> str:
+        blob = json.loads(blob_str)
+        nonce = base64.b64decode(blob["nonce"])
+        cipher = base64.b64decode(blob["cipher"])
+        return self.aesgcm.decrypt(nonce, cipher, None).decode()
 
     def log_to_memory(self, message: str):
-        encrypted = self.encrypt(message)
+        encrypted = self.encrypt(f"[{datetime.utcnow().isoformat()}] {message}")
         self._log_buffer.append(encrypted)
 
     def authorize_flush(self, token: str):
@@ -501,6 +543,23 @@ class StealthCovertOps:
                 os.remove(path)
         except:
             pass
+
+    def process_mask_linux(self):
+        if platform.system() == "Linux":
+            try:
+                with open("/proc/self/comm", "w") as f:
+                    f.write("systemd")
+            except:
+                pass
+
+    def panic(self):
+        print("[StealthOpsPQ] 🚨 PANIC: Wiping memory, faking noise, and terminating.")
+        self.clear_logs()
+        self.memory_saturate(500)
+        self.cpu_saturate(10)
+        self.fake_activity_noise()
+        self.process_mask_linux()
+        os._exit(1)
 
     def process_mask_linux(self):
         if platform.system() == "Linux":
@@ -2918,7 +2977,8 @@ class Darkelf(QMainWindow):
         self.log_path = os.path.join(os.path.expanduser("~"), ".darkelf_log")
         self._init_stealth_log()
         
-        self.phishing_detector = PhishingDetectorZeroTrace()
+        stealth_logger = StealthCovertOpsPQ()
+        phishing_detector = PhishingDetectorZeroTrace(pq_logger=stealth_logger)
                 
         self.disable_system_swap()  # Disable swap early
         self.init_settings()
@@ -4183,6 +4243,13 @@ class Darkelf(QMainWindow):
                 if hasattr(self, 'log_path') and os.path.exists(self.log_path):
                     self.log_stealth(f"Error wiping ML-KEM keys: {e}")
             # --- End: ML-KEM 1024 key wipe ---
+        
+            # Flush phishing logs (PQ-encrypted, memory-only)
+            if hasattr(self, 'phishing_detector'):
+                try:
+                    self.phishing_detector.flush_logs_on_exit()
+                except Exception as e:
+                    self.log_stealth(f"[!] Error flushing phishing logs: {e}")
 
             # Final: log
             if hasattr(self, 'log_path') and os.path.exists(self.log_path):
@@ -4365,7 +4432,7 @@ def main():
         "--disable-webgl-image-chromium "
         "--disable-text-autosizing "
         "--disable-peer-connection "
-        "--disable-javascript "
+        "--disable-javascript"
         "--disable-breakpad "
         "--disable-blink-features=ClientHints,UserAgentClientHint,UserAgentClient "
         "--disable-features=UserAgentClientHint,ClientHints,UserAgentReduction "
@@ -4395,3 +4462,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
