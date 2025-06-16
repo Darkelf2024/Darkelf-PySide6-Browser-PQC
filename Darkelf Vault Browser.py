@@ -4280,7 +4280,7 @@ def main():
         "--disable-webgl-image-chromium "
         "--disable-text-autosizing "
         "--disable-peer-connection "
-        "--disable-javascript"
+        "--disable-javascript "
         "--disable-breakpad "
         "--disable-blink-features=ClientHints,UserAgentClientHint,UserAgentClient "
         "--disable-features=UserAgentClientHint,ClientHints,UserAgentReduction "
