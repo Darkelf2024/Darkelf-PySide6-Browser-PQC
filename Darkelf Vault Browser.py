@@ -119,6 +119,7 @@ import stem.process
 from stem.connection import authenticate_cookie
 from stem.control import Controller
 from stem import Signal as StemSignal
+from stem import process as stem_process
 
 # PyQt5 Imports
 from PyQt5.QtWidgets import (
@@ -149,7 +150,7 @@ class HeaderInterceptor(QWebEngineUrlRequestInterceptor):
         # Spoofed or poisoned headers
         poison_headers = {
             b'referer': b'null',
-            b'user-agent': b'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0',
+            b'user-agent': b'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:102.0) Gecko/20100101 Firefox/102.0',
             b'sec-ch-ua': b'"Not_A_Brand";v="99", "Chromium";v="120", "FakeBrand";v="1"',
             b'sec-ch-ua-mobile': b'?0',
             b'sec-ch-ua-platform': b'"Windows"'
@@ -201,10 +202,9 @@ class DarkelfTLSMonitorJA3:
         self.user_agents = [
             "Mozilla/5.0 (Windows NT 10.0; rv:115.0) Gecko/20100101 Firefox/115.0",
             "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:95.0) Gecko/20100101 Firefox/95.0",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 12.5; rv:100.0) Gecko/20100101 Firefox/100.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 12.5; rv:92.0) Gecko/20100101 Firefox/92.0",
             "Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:98.0) Gecko/20100101 Firefox/98.0",
             "Mozilla/5.0 (X11; Linux x86_64; rv:78.0) Gecko/20100101 Firefox/78.0",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:92.0) Gecko/20100101 Firefox/92.0",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:102.0) Gecko/20100101 Firefox/102.0",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 11.2; rv:99.0) Gecko/20100101 Firefox/99.0"
         ]
@@ -430,7 +430,6 @@ class SecureCryptoUtils:
             backend=default_backend()
         )
         return base64.urlsafe_b64encode(kdf.derive(password))
-
 
 class StealthCovertOps:
     def __init__(self, stealth_mode=True):
@@ -1028,15 +1027,24 @@ class DarkelfAIPrivacyManager:
         self.page.inject_script(js, injection_point=QWebEngineScript.DocumentCreation)
 
     def _inject_screen(self):
-        w, h = self.persona['screen']
+        # Use Tor-like letterboxing resolution (e.g., 1000x1000)
+        tor_width = 1000
+        tor_height = 1000
+
         js = f"""
-        Object.defineProperty(window, 'innerWidth', {{ get: () => {w} }});
-        Object.defineProperty(window, 'innerHeight', {{ get: () => {h} }});
-        Object.defineProperty(screen, 'width', {{ get: () => {w} }});
-        Object.defineProperty(screen, 'height', {{ get: () => {h} }});
-        Object.defineProperty(screen, 'availWidth', {{ get: () => {w - 20} }});
-        Object.defineProperty(screen, 'availHeight', {{ get: () => {h - 40} }});
+        // [DarkelfAI] Spoof screen and window dimensions to mimic Tor Letterboxing (1000x1000)
+        Object.defineProperty(window, 'innerWidth', {{ get: () => {tor_width} }});
+        Object.defineProperty(window, 'innerHeight', {{ get: () => {tor_height} }});
+
+        Object.defineProperty(window, 'outerWidth', {{ get: () => {tor_width} }});
+        Object.defineProperty(window, 'outerHeight', {{ get: () => {tor_height} }});
+
+        Object.defineProperty(screen, 'width', {{ get: () => {tor_width} }});
+        Object.defineProperty(screen, 'height', {{ get: () => {tor_height} }});
+        Object.defineProperty(screen, 'availWidth', {{ get: () => {tor_width - 20} }});
+        Object.defineProperty(screen, 'availHeight', {{ get: () => {tor_height - 40} }});
         """
+
         self.page.inject_script(js, injection_point=QWebEngineScript.DocumentCreation)
 
     def _inject_language(self):
@@ -1138,6 +1146,7 @@ class CustomWebEnginePage(QWebEnginePage):
         self._inject_font_protection()
         self.spoof_font_loading_checks()
         self.inject_useragentdata_kill()
+        #self.inject_webgl_spoof()
         self.setup_csp()
 
     def inject_geolocation_override(self):
@@ -1159,6 +1168,60 @@ class CustomWebEnginePage(QWebEnginePage):
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
         
+    def inject_webgl_spoof(self):
+        script = """
+        (function () {
+            const spoofedVendor = "Intel Inc.";
+            const spoofedRenderer = "Intel Iris Xe Graphics";
+
+            function spoofGL(context) {
+                const originalGetParameter = context.getParameter;
+                context.getParameter = function (param) {
+                    if (param === 37445) return spoofedVendor;   // UNMASKED_VENDOR_WEBGL
+                    if (param === 37446) return spoofedRenderer; // UNMASKED_RENDERER_WEBGL
+                    return originalGetParameter.call(this, param);
+                };
+            }
+
+            const originalGetContext = HTMLCanvasElement.prototype.getContext;
+            HTMLCanvasElement.prototype.getContext = function(type, attrs) {
+                const ctx = originalGetContext.call(this, type, attrs);
+                if (type === "webgl" || type === "webgl2") {
+                    spoofGL(ctx);
+                }
+                return ctx;
+            };
+
+            // Spoof WebGLRenderingContext extensions
+            WebGLRenderingContext.prototype.getSupportedExtensions = function () {
+                return [
+                    "OES_texture_float", 
+                    "OES_standard_derivatives", 
+                    "OES_element_index_uint"
+                ];
+            };
+
+            // Spoof shader precision to reduce entropy
+            const origPrecision = WebGLRenderingContext.prototype.getShaderPrecisionFormat;
+            WebGLRenderingContext.prototype.getShaderPrecisionFormat = function() {
+                return { rangeMin: 127, rangeMax: 127, precision: 23 };
+            };
+
+            // Prevent detection of overridden functions
+            const hideOverride = (obj, name) => {
+                if (obj[name]) {
+                    Object.defineProperty(obj[name], 'toString', {
+                        value: () => `function ${name}() { [native code] }`
+                    });
+                }
+            };
+
+            hideOverride(WebGLRenderingContext.prototype, "getParameter");
+            hideOverride(HTMLCanvasElement.prototype, "getContext");
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+
     def inject_useragentdata_kill(self):
         script = """
         (function() {
@@ -1301,9 +1364,15 @@ class CustomWebEnginePage(QWebEnginePage):
 
     def _inject_font_protection(self):
         js = """
-        // [DarkelfAI] Soft font fingerprinting protection enabled
+        // [DarkelfAI] Font fingerprinting protection with .onion whitelist
 
         (function() {
+            const isOnion = window.location.hostname.endsWith(".onion");
+            if (isOnion) {
+                console.warn("[DarkelfAI] .onion site detected — skipping font spoofing.");
+                return;
+            }
+
             // Slight noise added to disrupt precise fingerprinting
             const randomize = (val, factor = 0.03) => val + (Math.random() * val * factor);
 
@@ -1344,7 +1413,7 @@ class CustomWebEnginePage(QWebEnginePage):
         })();
         """
         self.inject_script(js, injection_point=QWebEngineScript.DocumentCreation)
-
+        
     def spoof_font_loading_checks(self):
         script = """
         (function() {
@@ -3244,12 +3313,23 @@ class Darkelf(QMainWindow):
                 return
 
             tor_path = shutil.which("tor")
+            obfs4_path = shutil.which("obfs4proxy")
 
             if not tor_path or not os.path.exists(tor_path):
-                QMessageBox.critical(self, "Tor Error", "Tor executable not found! Install it using 'brew install tor'.")
+                QMessageBox.critical(self, "Tor Error", "Tor not found. Please install it using:\n\n  brew install tor\nor\n  sudo apt install tor")
                 return
 
-            # Optimized Tor configuration
+            if not obfs4_path or not os.path.exists(obfs4_path):
+                QMessageBox.critical(self, "Tor Error", "obfs4proxy not found. Please install it using:\n\n  brew install obfs4proxy\nor\n  sudo apt install obfs4proxy")
+                return
+
+            bridges = [
+                "obfs4 185.177.207.158:8443 B9E39FA01A5C72F0774A840F91BC72C2860954E5 cert=WA1P+AQj7sAZV9terWaYV6ZmhBUcj89Ev8ropu/IED4OAtqFm7AdPHB168BPoW3RrN0NfA iat-mode=0",
+                "obfs4 91.227.77.152:465 42C5E354B0B9028667CFAB9705298F8C3623A4FB cert=JKS4que9Waw8PyJ0YRmx3QrSxv/YauS7HfxzmR51rCJ/M9jCKscJu7SOuz//dmzGJiMXdw iat-mode=2"
+            ]
+
+            random.shuffle(bridges)
+
             tor_config = {
                 'SocksPort': '9052',
                 'ControlPort': '9053',
@@ -3263,35 +3343,67 @@ class Darkelf(QMainWindow):
                 'AvoidDiskWrites': '1',
                 'CookieAuthentication': '1',
                 'DataDirectory': '/tmp/darkelf-tor-data',
-                'Log': 'notice stdout'
+                'Log': 'notice stdout',
+                'UseBridges': '1',
+                'ClientTransportPlugin': f'obfs4 exec {obfs4_path}',
+                'Bridge': bridges,
+                'StrictNodes': '1',
+                'BridgeRelay': '0'
             }
 
-            self.tor_process = stem.process.launch_tor_with_config(
-                tor_cmd=tor_path,
-                config=tor_config,
-                init_msg_handler=lambda line: print("[tor]", line)
-                #init_msg_handler=lambda line: print(line) if 'Bootstrapped ' in line else None
-            )  # <== THIS closes the call properly
+            try:
+                self.tor_process = stem_process.launch_tor_with_config(
+                    tor_cmd=tor_path,
+                    config=tor_config,
+                    init_msg_handler=lambda line: print("[tor]", line)
+                )
+            except Exception as bridge_error:
+                print("[Darkelf] Bridge connection failed:", bridge_error)
 
-            self.controller = Controller.from_port(port=9053)
-            cookie_path = os.path.join('/tmp/darkelf-tor-data', 'control_auth_cookie')
-            authenticate_cookie(self.controller, cookie_path=cookie_path)
-            print("[Darkelf] Tor authenticated via cookie.")
+                if not getattr(self, "allow_direct_fallback", False):
+                    QMessageBox.critical(self, "Tor Bridge Error", "Bridge connection failed and direct fallback is disabled.")
+                    return  # Stop here if fallback not allowed
+
+                # FALLBACK TO DIRECT CONNECTION
+                QMessageBox.warning(self, "Tor Fallback", "Bridge connection failed. Trying direct Tor connection...")
+
+                tor_config.pop('UseBridges', None)
+                tor_config.pop('ClientTransportPlugin', None)
+                tor_config.pop('Bridge', None)
+                tor_config.pop('BridgeRelay', None)
+
+                self.tor_process = stem_process.launch_tor_with_config(
+                    tor_cmd=tor_path,
+                    config=tor_config,
+                    init_msg_handler=lambda line: print("[tor fallback]", line)
+                )
+
+                # Authenticate controller
+                self.controller = Controller.from_port(port=9053)
+                cookie_path = os.path.join(tor_config['DataDirectory'], 'control_auth_cookie')
             
-            print("Tor started successfully.")
+                with open(cookie_path, 'rb') as f:
+                    cookie = f.read()
+                
+                self.controller.authenticate(password=None, cookie=cookie)
+                print("[Darkelf] Tor authenticated via cookie.")
 
-            # Optional SOCKS test with ML-KEM wrapping (if used in your stack)
+            # Optional PQC test
             try:
                 test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 test_sock.connect(("127.0.0.1", 9052))
-                protector = NetworkProtector(test_sock)  # Assuming this wraps ML-KEM
+                protector = NetworkProtector(test_sock)
                 protector.send_protected(b"[Darkelf] Tor SOCKS test with PQC")
                 test_sock.close()
             except Exception as e:
                 print(f"[Darkelf] Failed test connection through Tor SOCKS: {e}")
 
+            print("Tor started successfully.")
+
         except OSError as e:
             QMessageBox.critical(None, "Tor Error", f"Failed to start Tor: {e}")
+        except Exception as e:
+            QMessageBox.critical(None, "Tor Error", f"Unexpected error: {e}")
 
     def is_tor_running(self):
         try:
@@ -3678,7 +3790,7 @@ class Darkelf(QMainWindow):
         media_devices_action.setChecked(self.block_media_devices)
         media_devices_action.triggered.connect(self.toggle_media_devices)
         settings_menu.addAction(media_devices_action)
-                
+
     def init_shortcuts(self):
         # Shortcut for creating a new tab (Cmd+T on macOS, Ctrl+T on other systems)
         QShortcut(QKeySequence("Ctrl+T" if sys.platform != 'darwin' else "Meta+T"), self, self.create_new_tab)
@@ -3735,9 +3847,12 @@ class Darkelf(QMainWindow):
 
     def close_tab(self, index):
         if self.tab_widget.count() < 2:
-            return
+            self.create_new_tab()
+    
         widget = self.tab_widget.widget(index)
-        widget.deleteLater()
+        if widget:
+            widget.deleteLater()
+            
         self.tab_widget.removeTab(index)
         self.clear_cache_and_history()
 
@@ -4171,8 +4286,9 @@ def main():
         "--disable-features=UserAgentClientHint,ClientHints,UserAgentReduction "
         "--disable-features=NetworkService,PrefetchPrivacyChanges "
         "--force-major-version-to-minor "  # Sends random or shifted UA strings
-        "--user-agent=\"Mozilla/5.0 (X11; Linux x86_64; rv:78.0) Gecko/20100101 Firefox/78.0 "
+        "--user-agent=\"Mozilla/5.0 (X11; Linux x86_64; rv:102.0) Gecko/20100101 Firefox/102.0 "
         "--disable-http=cache "
+        "--cipher-suite-blacklist=0x0004,0x0005,0x002f,0x0035 "
         '--proxy-server="http://127.0.0.1:8080"'
         "--disk-cache-dir=/dev/null"
     )
@@ -4194,3 +4310,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
