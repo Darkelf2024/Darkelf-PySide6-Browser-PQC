@@ -144,10 +144,9 @@ from PyQt5.QtCore import (
     pyqtSignal, QThread
 )
 
-
 class HeaderInterceptor(QWebEngineUrlRequestInterceptor):
     def interceptRequest(self, info):
-        # Spoofed or poisoned headers this applies to PySide6 Post Quantum not Darkelf Vault
+        # Spoofed or poisoned headers
         poison_headers = {
             b'referer': b'null',
             b'user-agent': b'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:102.0) Gecko/20100101 Firefox/102.0',
@@ -777,7 +776,47 @@ class MLKEM768Manager:
 
     def get_private_key(self) -> Optional[bytes]:
         return self.kyber_private_key
-    
+        
+class EncryptedLoggerMLKEM768:
+    def __init__(self):
+        self.lock = threading.Lock()
+
+    def log(self, message: str):
+        encrypted = self.encrypt_with_mlkem(message)
+        print(encrypted)
+
+    def encrypt_with_mlkem(self, plaintext: str) -> str:
+        try:
+            kem = oqs.KeyEncapsulation("ML-KEM-768")
+            public_key = kem.generate_keypair()
+            private_key = kem.export_secret_key()
+
+            ciphertext, shared_secret = kem.encap_secret(public_key)
+
+            salt = os.urandom(16)
+            aes_key = HKDF(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=salt,
+                info=b"mlkem768_aes_key"
+            ).derive(shared_secret)
+
+            aesgcm = AESGCM(aes_key)
+            nonce = os.urandom(12)
+            encrypted_payload = aesgcm.encrypt(nonce, plaintext.encode(), None)
+
+            encrypted_blob = {
+                "ciphertext": base64.b64encode(ciphertext).decode(),
+                "nonce": base64.b64encode(nonce).decode(),
+                "payload": base64.b64encode(encrypted_payload).decode(),
+                "salt": base64.b64encode(salt).decode(),
+            }
+
+            encoded = base64.b64encode(json.dumps(encrypted_blob).encode()).decode()
+            return f"[EncryptedMLKEM768]::{encoded}"
+        except Exception as e:
+            return f"[EncryptionError]::{str(e)}"
+
 class PQCryptoAPI(QObject):
     def __init__(self):
         super().__init__()
@@ -1206,6 +1245,7 @@ class CustomWebEnginePage(QWebEnginePage):
         self.spoof_font_loading_checks()
         self.inject_useragentdata_kill()
         #self.inject_webgl_spoof()
+        self.inject_iframe_override()
         self.setup_csp()
 
     def inject_geolocation_override(self):
@@ -1227,6 +1267,40 @@ class CustomWebEnginePage(QWebEnginePage):
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
         
+    def inject_iframe_override(self):
+        script = """
+        (function() {
+            const poisonIframe = (frame) => {
+                try {
+                    if (frame.contentWindow && frame.contentWindow.navigator) {
+                        frame.contentWindow.navigator.geolocation = undefined;
+                        Object.defineProperty(frame.contentWindow.navigator, 'platform', { value: 'unknown', configurable: true });
+                        Object.defineProperty(frame.contentWindow.navigator, 'vendor', { value: '', configurable: true });
+                    }
+                } catch (e) {
+                    // Ignore cross-origin issues
+                }
+            };
+
+            // Poison existing iframes
+            document.querySelectorAll('iframe').forEach(poisonIframe);
+
+            // Observe for dynamically added iframes
+            const observer = new MutationObserver(function(mutations) {
+                for (let mutation of mutations) {
+                    for (let node of mutation.addedNodes) {
+                        if (node.tagName === 'IFRAME') {
+                            poisonIframe(node);
+                        }
+                    }
+                }
+            });
+
+            observer.observe(document, { childList: true, subtree: true });
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+
     def inject_webgl_spoof(self):
         script = """
         (function () {
@@ -2993,6 +3067,10 @@ class Darkelf(QMainWindow):
         profile = QWebEngineProfile.defaultProfile()
         profile.setUrlRequestInterceptor(interceptor)
         
+        # --- Inject JavaScript to strip DOM ads (banners, iframes, etc) ---
+        #script = create_dom_cleaner_script()
+        #profile.scripts().insert(script)
+        
         QTimer.singleShot(8000, self.start_forensic_tool_monitor)
         
         # Launch JA3 spoofing proxy
@@ -3285,6 +3363,8 @@ class Darkelf(QMainWindow):
 
         # Configure web engine profile
         self.configure_web_engine_profile()
+        
+        self.logger = EncryptedLoggerMLKEM768()
 
         # Initialize Tor if enabled
         self.init_tor()
