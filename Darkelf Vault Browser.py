@@ -312,7 +312,6 @@ class SecureBuffer:
         self.zero()
         self.buffer.close()
 
-
 class MemoryMonitor(threading.Thread):
     """
     Monitors system memory. If available memory falls below threshold,
@@ -1251,22 +1250,28 @@ class CustomWebEnginePage(QWebEnginePage):
     def inject_geolocation_override(self):
         script = """
         (function() {
-            if (navigator.geolocation) {
-                navigator.geolocation.getCurrentPosition = function(success, error, options) {
-                    if (error) {
-                        error({ code: 1, message: "Geolocation access denied." });
+            // Completely remove navigator.geolocation
+            Object.defineProperty(navigator, "geolocation", {
+                get: function () {
+                    return undefined;
+                },
+                configurable: true
+            });
+
+            // Fake permissions API to return denied
+            if (navigator.permissions && navigator.permissions.query) {
+                const originalQuery = navigator.permissions.query;
+                navigator.permissions.query = function(parameters) {
+                    if (parameters.name === "geolocation") {
+                        return Promise.resolve({ state: "denied" });
                     }
-                };
-                navigator.geolocation.watchPosition = function(success, error, options) {
-                    if (error) {
-                        error({ code: 1, message: "Geolocation access denied." });
-                    }
+                    return originalQuery(parameters);
                 };
             }
         })();
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
-        
+
     def inject_iframe_override(self):
         script = """
         (function() {
@@ -3354,10 +3359,10 @@ class Darkelf(QMainWindow):
 
         # Initialize settings
         self.anti_fingerprinting_enabled = self.settings.value("anti_fingerprinting_enabled", True, type=bool)
-        self.tor_network_enabled = self.settings.value("tor_network_enabled", False, type=bool)
+        self.tor_network_enabled = self.settings.value("tor_network_enabled", True, type=bool)
         self.https_enforced = self.settings.value("https_enforced", True, type=bool)
         self.cookies_enabled = self.settings.value("cookies_enabled", False, type=bool)
-        self.geolocation_enabled = self.settings.value("geolocation_enabled", False, type=bool)
+        self.block_geolocation = self.settings.value("block_geolocation", True, type=bool)
         self.block_device_orientation = self.settings.value("block_device_orientation", True, type=bool)
         self.block_media_devices = self.settings.value("block_media_devices", True, type=bool)
 
@@ -3918,8 +3923,8 @@ class Darkelf(QMainWindow):
         cookies_action.setChecked(not self.cookies_enabled)
         cookies_action.triggered.connect(self.toggle_cookies)
         settings_menu.addAction(cookies_action)
-        geolocation_action = QAction("Enable Geolocation", self, checkable=True)
-        geolocation_action.setChecked(self.geolocation_enabled)
+        geolocation_action = QAction("Block Geolocation", self, checkable=True)
+        geolocation_action.setChecked(self.block_geolocation)  # Reflect actual state
         geolocation_action.triggered.connect(self.toggle_geolocation)
         settings_menu.addAction(geolocation_action)
         orientation_action = QAction("Block Device Orientation", self, checkable=True)
@@ -4097,8 +4102,8 @@ class Darkelf(QMainWindow):
         self.configure_web_engine_profile()
 
     def toggle_geolocation(self, enabled):
-        self.geolocation_enabled = enabled
-        self.settings.setValue("geolocation_enabled", enabled)
+        self.block_geolocation = enabled
+        self.settings.setValue("block_geolocation", enabled)
 
     def toggle_device_orientation(self, enabled):
         self.block_device_orientation = enabled
@@ -4457,4 +4462,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
