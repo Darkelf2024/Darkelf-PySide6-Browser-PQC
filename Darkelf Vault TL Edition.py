@@ -144,7 +144,6 @@ from PyQt5.QtCore import (
     pyqtSignal, QThread
 )
 
-
 class HeaderInterceptor(QWebEngineUrlRequestInterceptor):
     def interceptRequest(self, info):
         # Spoofed or poisoned headers
@@ -312,7 +311,6 @@ class SecureBuffer:
     def close(self):
         self.zero()
         self.buffer.close()
-
 
 class MemoryMonitor(threading.Thread):
     """
@@ -777,7 +775,47 @@ class MLKEM768Manager:
 
     def get_private_key(self) -> Optional[bytes]:
         return self.kyber_private_key
-    
+        
+class EncryptedLoggerMLKEM768:
+    def __init__(self):
+        self.lock = threading.Lock()
+
+    def log(self, message: str):
+        encrypted = self.encrypt_with_mlkem(message)
+        print(encrypted)
+
+    def encrypt_with_mlkem(self, plaintext: str) -> str:
+        try:
+            kem = oqs.KeyEncapsulation("ML-KEM-768")
+            public_key = kem.generate_keypair()
+            private_key = kem.export_secret_key()
+
+            ciphertext, shared_secret = kem.encap_secret(public_key)
+
+            salt = os.urandom(16)
+            aes_key = HKDF(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=salt,
+                info=b"mlkem768_aes_key"
+            ).derive(shared_secret)
+
+            aesgcm = AESGCM(aes_key)
+            nonce = os.urandom(12)
+            encrypted_payload = aesgcm.encrypt(nonce, plaintext.encode(), None)
+
+            encrypted_blob = {
+                "ciphertext": base64.b64encode(ciphertext).decode(),
+                "nonce": base64.b64encode(nonce).decode(),
+                "payload": base64.b64encode(encrypted_payload).decode(),
+                "salt": base64.b64encode(salt).decode(),
+            }
+
+            encoded = base64.b64encode(json.dumps(encrypted_blob).encode()).decode()
+            return f"[EncryptedMLKEM768]::{encoded}"
+        except Exception as e:
+            return f"[EncryptionError]::{str(e)}"
+
 class PQCryptoAPI(QObject):
     def __init__(self):
         super().__init__()
@@ -1205,23 +1243,29 @@ class CustomWebEnginePage(QWebEnginePage):
         self._inject_font_protection()
         self.spoof_font_loading_checks()
         self.inject_useragentdata_kill()
-        self.inject_iframe_override()
         #self.inject_webgl_spoof()
+        self.inject_iframe_override()
         self.setup_csp()
 
     def inject_geolocation_override(self):
         script = """
         (function() {
-            if (navigator.geolocation) {
-                navigator.geolocation.getCurrentPosition = function(success, error, options) {
-                    if (error) {
-                        error({ code: 1, message: "Geolocation access denied." });
+            // Completely remove navigator.geolocation
+            Object.defineProperty(navigator, "geolocation", {
+                get: function () {
+                    return undefined;
+                },
+                configurable: true
+            });
+
+            // Fake permissions API to return denied
+            if (navigator.permissions && navigator.permissions.query) {
+                const originalQuery = navigator.permissions.query;
+                navigator.permissions.query = function(parameters) {
+                    if (parameters.name === "geolocation") {
+                        return Promise.resolve({ state: "denied" });
                     }
-                };
-                navigator.geolocation.watchPosition = function(success, error, options) {
-                    if (error) {
-                        error({ code: 1, message: "Geolocation access denied." });
-                    }
+                    return originalQuery(parameters);
                 };
             }
         })();
@@ -1260,8 +1304,8 @@ class CustomWebEnginePage(QWebEnginePage):
             observer.observe(document, { childList: true, subtree: true });
         })();
         """
-        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)       
-        
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+
     def inject_webgl_spoof(self):
         script = """
         (function () {
@@ -3028,6 +3072,10 @@ class Darkelf(QMainWindow):
         profile = QWebEngineProfile.defaultProfile()
         profile.setUrlRequestInterceptor(interceptor)
         
+        # --- Inject JavaScript to strip DOM ads (banners, iframes, etc) ---
+        #script = create_dom_cleaner_script()
+        #profile.scripts().insert(script)
+        
         QTimer.singleShot(8000, self.start_forensic_tool_monitor)
         
         # Launch JA3 spoofing proxy
@@ -3311,15 +3359,17 @@ class Darkelf(QMainWindow):
 
         # Initialize settings
         self.anti_fingerprinting_enabled = self.settings.value("anti_fingerprinting_enabled", True, type=bool)
-        self.tor_network_enabled = self.settings.value("tor_network_enabled", False, type=bool)
+        self.tor_network_enabled = self.settings.value("tor_network_enabled", True, type=bool)
         self.https_enforced = self.settings.value("https_enforced", True, type=bool)
         self.cookies_enabled = self.settings.value("cookies_enabled", False, type=bool)
-        self.geolocation_enabled = self.settings.value("geolocation_enabled", False, type=bool)
+        self.block_geolocation = self.settings.value("block_geolocation", True, type=bool)
         self.block_device_orientation = self.settings.value("block_device_orientation", True, type=bool)
         self.block_media_devices = self.settings.value("block_media_devices", True, type=bool)
 
         # Configure web engine profile
         self.configure_web_engine_profile()
+        
+        self.logger = EncryptedLoggerMLKEM768()
 
         # Initialize Tor if enabled
         self.init_tor()
@@ -3646,9 +3696,33 @@ class Darkelf(QMainWindow):
         web_view = current_tab.findChild(QWebEngineView)
         if web_view:
             web_view.setHtml(self.custom_homepage_html())
+    
+    def enable_light_mode(self):
+        self.homepage_mode = "light"
+        self.load_homepage()
+
+    def enable_grey_mode(self):
+        self.homepage_mode = "grey"
+        self.load_homepage()
+
+    def enable_dark_mode(self):
+        self.homepage_mode = "dark"
+        self.load_homepage()
 
     def custom_homepage_html(self):
-        html_content = """
+        if self.homepage_mode == "dark":
+            background_color = "#000"
+            text_color = "#ddd"
+            button_color = "#34C759"
+        elif self.homepage_mode == "grey":
+            background_color = "#808080"
+            text_color = "#000"
+            button_color = "#A9A9A9"
+        else:  # light mode
+            background_color = "#fff"
+            text_color = "#000"
+            button_color = "#4CAF50"
+        html_content = f"""
         <!DOCTYPE html>
         <html lang="en">
         <head>
@@ -3657,10 +3731,10 @@ class Darkelf(QMainWindow):
             <title>Darkelf</title>
             <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons/font/bootstrap-icons.css" rel="stylesheet">
             <style id="theme-style">
-                body {
+                body {{
                     font-family: Arial, sans-serif;
-                    background-color: #000;
-                    color: #ddd;
+                    background-color: {background_color};
+                    color: {text_color};
                     margin: 0;
                     padding: 0;
                     display: flex;
@@ -3668,26 +3742,26 @@ class Darkelf(QMainWindow):
                     height: 100vh;
                     align-items: center;
                     justify-content: center;
-                }
-                .content {
+                }}
+                .content {{
                     flex: 1;
                     display: flex;
                     flex-direction: column;
                     align-items: center;
                     justify-content: center;
-                }
-                h1 {
+                }}
+                h1 {{
                     font-size: 36px;
                     margin-bottom: 20px;
-                    color: #34C759; /* Same green as the tab */
-                }
-                form {
+                    color: {button_color};
+                }}
+                form {{
                     display: flex;
                     align-items: center;
                     justify-content: center;
                     margin-top: 20px;
-                }
-                input[type="text"] {
+                }}
+                input[type="text"] {{
                     padding: 10px;
                     width: 500px;
                     margin-right: 10px;
@@ -3696,10 +3770,10 @@ class Darkelf(QMainWindow):
                     font-size: 16px;
                     background-color: #333;
                     color: #ddd;
-                }
-                button[type="submit"] {
+                }}
+                button[type="submit"] {{
                     padding: 10px 20px;
-                    background-color: #333;
+                    background-color: {button_color};
                     border: none;
                     color: white;
                     border-radius: 5px;
@@ -3708,10 +3782,10 @@ class Darkelf(QMainWindow):
                     display: flex;
                     align-items: center;
                     justify-content: center;
-                }
-                button[type="submit"]:hover {
-                    color: #34C759;
-                }
+                }}
+                button[type="submit"]:hover {{
+                    background-color: #28A745;
+                }}
             </style>
         </head>
         <body>
@@ -3741,7 +3815,7 @@ class Darkelf(QMainWindow):
 
     def create_menu_bar(self):
         menu_bar = QMenuBar(self)
-
+    
         # Create menus
         navigation_menu = menu_bar.addMenu("Navigation")
         self.add_navigation_actions(navigation_menu)
@@ -3823,10 +3897,6 @@ class Darkelf(QMainWindow):
         tor_action.setChecked(self.tor_network_enabled)
         tor_action.triggered.connect(self.toggle_tor_network)
         security_menu.addAction(tor_action)
-        firefox_user_agent_action = QAction("Enable Firefox Agent", self, checkable=True)
-        firefox_user_agent_action.setChecked(True)
-        firefox_user_agent_action.triggered.connect(lambda: self.toggle_firefox_user_agent(firefox_user_agent_action.isChecked()))
-        security_menu.addAction(firefox_user_agent_action)
         clear_cache_action = QAction("Clear Cache", self)
         clear_cache_action.triggered.connect(self.clear_cache)
         security_menu.addAction(clear_cache_action)
@@ -3843,8 +3913,8 @@ class Darkelf(QMainWindow):
         cookies_action.setChecked(not self.cookies_enabled)
         cookies_action.triggered.connect(self.toggle_cookies)
         settings_menu.addAction(cookies_action)
-        geolocation_action = QAction("Enable Geolocation", self, checkable=True)
-        geolocation_action.setChecked(self.geolocation_enabled)
+        geolocation_action = QAction("Block Geolocation", self, checkable=True)
+        geolocation_action.setChecked(self.block_geolocation)  # Reflect actual state
         geolocation_action.triggered.connect(self.toggle_geolocation)
         settings_menu.addAction(geolocation_action)
         orientation_action = QAction("Block Device Orientation", self, checkable=True)
@@ -4104,7 +4174,7 @@ class Darkelf(QMainWindow):
         if text.startswith(('http://', 'https://')):
             self.create_new_tab(text)
         else:
-            self.create_new_tab(f"https://lite.duckduckgo.com/lite/?q={text}")
+            self.create_new_tab(f"https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite/?q={text}")
 
     def toggle_javascript(self, enabled):
         self.javascript_enabled = enabled
@@ -4137,8 +4207,8 @@ class Darkelf(QMainWindow):
         self.configure_web_engine_profile()
 
     def toggle_geolocation(self, enabled):
-        self.geolocation_enabled = enabled
-        self.settings.setValue("geolocation_enabled", enabled)
+        self.block_geolocation = enabled
+        self.settings.setValue("block_geolocation", enabled)
 
     def toggle_device_orientation(self, enabled):
         self.block_device_orientation = enabled
@@ -4497,4 +4567,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
