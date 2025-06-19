@@ -3792,7 +3792,7 @@ class Darkelf(QMainWindow):
             <div class="content">
                 <h1>Darkelf Browser</h1>
                 <p>Your privacy is our priority.</p>
-                <form id="searchForm" action="https://lite.duckduckgo.com/lite/" method="get">
+                <form id="searchForm" action="https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite/" method="get">
                     <input type="text" id="searchInput" name="q" placeholder="Search DuckDuckGo">
                     <button type="submit"><i class="bi bi-search"></i></button>
                 </form>
