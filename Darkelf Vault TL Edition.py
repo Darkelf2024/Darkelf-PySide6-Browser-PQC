@@ -1205,6 +1205,7 @@ class CustomWebEnginePage(QWebEnginePage):
         self._inject_font_protection()
         self.spoof_font_loading_checks()
         self.inject_useragentdata_kill()
+        self.inject_iframe_override()
         #self.inject_webgl_spoof()
         self.setup_csp()
 
@@ -1226,6 +1227,40 @@ class CustomWebEnginePage(QWebEnginePage):
         })();
         """
         self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)
+
+    def inject_iframe_override(self):
+        script = """
+        (function() {
+            const poisonIframe = (frame) => {
+                try {
+                    if (frame.contentWindow && frame.contentWindow.navigator) {
+                        frame.contentWindow.navigator.geolocation = undefined;
+                        Object.defineProperty(frame.contentWindow.navigator, 'platform', { value: 'unknown', configurable: true });
+                        Object.defineProperty(frame.contentWindow.navigator, 'vendor', { value: '', configurable: true });
+                    }
+                } catch (e) {
+                    // Ignore cross-origin issues
+                }
+            };
+
+            // Poison existing iframes
+            document.querySelectorAll('iframe').forEach(poisonIframe);
+
+            // Observe for dynamically added iframes
+            const observer = new MutationObserver(function(mutations) {
+                for (let mutation of mutations) {
+                    for (let node of mutation.addedNodes) {
+                        if (node.tagName === 'IFRAME') {
+                            poisonIframe(node);
+                        }
+                    }
+                }
+            });
+
+            observer.observe(document, { childList: true, subtree: true });
+        })();
+        """
+        self.inject_script(script, injection_point=QWebEngineScript.DocumentCreation)       
         
     def inject_webgl_spoof(self):
         script = """
