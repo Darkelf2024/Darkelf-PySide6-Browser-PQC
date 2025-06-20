@@ -672,14 +672,11 @@ class KyberManager:
     - Key generation
     - Public/private key handling
     - Data encryption/decryption
-    - Network-level encryption
     """
-
     def __init__(self):
         self.kem = oqs.KeyEncapsulation("ML-KEM-768")
         self.public_key = self.kem.generate_keypair()
         self.secret_key = self.kem.export_secret_key()
-        self.aes_key = None
 
     def get_public_key(self, b64: bool = True):
         return base64.b64encode(self.public_key).decode() if b64 else self.public_key
@@ -727,8 +724,9 @@ class KyberManager:
         decrypted = aesgcm.decrypt(nonce, encrypted_payload, None)
         return decrypted.decode()
 
+
 class NetworkProtector:
-    def __init__(self, sock, peer_kyber_pub_b64: str):
+    def __init__(self, sock: socket.socket, peer_kyber_pub_b64: str):
         self.sock = sock
         self.secure_random = random.SystemRandom()
         self.peer_pub = base64.b64decode(peer_kyber_pub_b64)
@@ -3559,13 +3557,14 @@ class Darkelf(QMainWindow):
             try:
                 test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 test_sock.connect(("127.0.0.1", 9052))
-                protector = NetworkProtector(test_sock)
+
+                # Example peer public key; replace with a real one in practice
+                peer_pub_key_b64 = KyberManager().get_public_key()
+                protector = NetworkProtector(test_sock, peer_pub_key_b64)
                 protector.send_protected(b"[Darkelf] Tor SOCKS test with PQC")
                 test_sock.close()
             except Exception as e:
                 print(f"[Darkelf] Failed test connection through Tor SOCKS: {e}")
-
-            print("Tor started successfully.")
 
         except OSError as e:
             QMessageBox.critical(None, "Tor Error", f"Failed to start Tor: {e}")
