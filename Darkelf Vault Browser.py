@@ -93,6 +93,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from pqcrypto.kem import ml_kem_768 as kyber
 from cryptography.hazmat.backends import default_backend
 from cryptography.fernet import Fernet
 from sklearn.ensemble import RandomForestClassifier
@@ -574,45 +575,60 @@ def hardened_random_delay(min_delay=0.1, max_delay=1.0, jitter=0.05):
     final_delay = max(0, base_delay + noise)
     time.sleep(final_delay)
 
+def hardened_random_delay(min_s: float, max_s: float):
+    time.sleep(random.uniform(min_s, max_s))
+
 class ObfuscatedEncryptedCookieStore:
     def __init__(self, qt_cookie_store: QWebEngineCookieStore):
-        self.store = {}  # {obfuscated_name: (encrypted_value, salt)}
+        self.store = {}  # {enc_name: (enc_value, kem_ciphertext)}
         self.qt_cookie_store = qt_cookie_store
         self.qt_cookie_store.cookieAdded.connect(self.intercept_cookie)
-        self.master_salt = secrets.token_bytes(16)
-        self.master_key = SecureCryptoUtils.derive_key(b"cookie_master_key", self.master_salt)
+
+        # Post-quantum keypair for values
+        self.master_public_key, self.master_private_key = kyber.generate_keypair()
+
+        # 🔐 Secret for encrypting cookie names
+        obf_key = hashlib.sha256(b"obfuscation_secret_42").digest()
+        self.name_crypto = Fernet(base64.urlsafe_b64encode(obf_key[:32]))
 
     def obfuscate_name(self, name: str) -> str:
-        return hashlib.sha256(name.encode()).hexdigest()[:16]
+        return self.name_crypto.encrypt(name.encode()).decode()
+
+    def deobfuscate_name(self, enc_name: str) -> str:
+        return self.name_crypto.decrypt(enc_name.encode()).decode()
 
     def intercept_cookie(self, cookie):
         hardened_random_delay(0.2, 1.5)
         name = bytes(cookie.name()).decode(errors='ignore')
         value = bytes(cookie.value()).decode(errors='ignore')
-        obfuscated_name = self.obfuscate_name(name)
-        self.set_cookie(obfuscated_name, value)
+        self.set_cookie(name, value)
 
-    def set_cookie(self, name: str, value: str):
+    def set_cookie(self, real_name: str, value: str):
         hardened_random_delay(0.2, 1.5)
-        salt = secrets.token_bytes(16)
-        key = SecureCryptoUtils.derive_key(self.master_key, salt)
-        cipher = Fernet(key)
-        encrypted = cipher.encrypt(value.encode())
-        self.store[name] = (encrypted, salt)
-        del cipher
-        del key
+        enc_name = self.obfuscate_name(real_name)
 
-    def get_cookie(self, name: str) -> str:
+        kem_ct, shared = kyber.encrypt(self.master_public_key)
+        key = hashlib.sha256(shared).digest()
+        fkey = base64.urlsafe_b64encode(key[:32])
+        cipher = Fernet(fkey)
+        enc_value = cipher.encrypt(value.encode())
+        self.store[enc_name] = (enc_value, kem_ct)
+        del cipher, key, fkey
+
+    def get_cookie(self, real_name: str) -> str:
         hardened_random_delay(0.1, 1.0)
-        entry = self.store.get(name)
-        if entry:
-            encrypted, salt = entry
-            key = SecureCryptoUtils.derive_key(self.master_key, salt)
-            cipher = Fernet(key)
-            value = cipher.decrypt(encrypted).decode()
-            del cipher
-            return value
-        return None
+        enc_name = self.obfuscate_name(real_name)
+        entry = self.store.get(enc_name)
+        if not entry:
+            return None
+        enc_value, kem_ct = entry
+        shared = kyber.decrypt(self.master_private_key, kem_ct)
+        key = hashlib.sha256(shared).digest()
+        fkey = base64.urlsafe_b64encode(key[:32])
+        cipher = Fernet(fkey)
+        val = cipher.decrypt(enc_value).decode()
+        del cipher
+        return val
 
     def clear(self):
         hardened_random_delay(0.3, 1.0)
@@ -624,33 +640,14 @@ class ObfuscatedEncryptedCookieStore:
         self._secure_erase()
 
     def _secure_erase(self):
-        for name in list(self.store.keys()):
-            encrypted, salt = self.store[name]
-            self.store[name] = (secrets.token_bytes(len(encrypted)), secrets.token_bytes(len(salt)))
-            del self.store[name]
+        for enc_name in list(self.store.keys()):
+            enc_value, kem_ct = self.store[enc_name]
+            self.store[enc_name] = (
+                secrets.token_bytes(len(enc_value)),
+                secrets.token_bytes(len(kem_ct))
+            )
+            del self.store[enc_name]
         self.store.clear()
-        
-class NetworkProtector:
-    def __init__(self, sock):
-        self.sock = sock
-        self.secure_random = random.SystemRandom()
-
-    def add_jitter(self, min_delay=0.05, max_delay=0.3):
-        jitter = self.secure_random.uniform(min_delay, max_delay)
-        time.sleep(jitter)
-        print(f"[Darkelf] Jitter applied: {jitter:.3f}s")
-
-    def send_with_padding(self, data: bytes, min_padding=128, max_padding=256):
-        target_size = max(len(data), self.secure_random.randint(min_padding, max_padding))
-        pad_len = target_size - len(data)
-        padding = os.urandom(pad_len)
-        padded_data = data + padding
-        self.sock.sendall(padded_data)
-        print(f"[Darkelf] Sent padded data (original: {len(data)}, padded: {len(padded_data)}, pad: {pad_len})")
-
-    def send_protected(self, data: bytes):
-        self.add_jitter()
-        self.send_with_padding(data)
 
 # Debounce function to limit the rate at which a function can fire
 def debounce(func, wait):
@@ -669,113 +666,137 @@ def debounce(func, wait):
 
     return debounced
     
-class MLKEM768Manager:
+class KyberManager:
     """
-    A manager for ML-KEM-768 (Kyber768) using OQS for KEM
-    and AES-GCM for symmetric encryption.
+    Unified manager for ML-KEM-768 (Kyber768) operations including:
+    - Key generation
+    - Public/private key handling
+    - Data encryption/decryption
+    - Network-level encryption
     """
 
-    def __init__(self, data_to_encrypt: Optional[str] = None, sync: bool = False):
-        self.kem: Optional[oqs.KeyEncapsulation] = None
-        self.kyber_public_key: Optional[bytes] = None
-        self.kyber_private_key: Optional[bytes] = None
-        self.data_to_encrypt: str = data_to_encrypt or "Default secret"
-        self.encrypted_data: Optional[str] = None
-        self.decrypted_data: Optional[str] = None
-        self._encryption_done = threading.Event()
+    def __init__(self):
+        self.kem = oqs.KeyEncapsulation("ML-KEM-768")
+        self.public_key = self.kem.generate_keypair()
+        self.secret_key = self.kem.export_secret_key()
+        self.aes_key = None
 
-        if sync:
-            self.generate_keys_and_encrypt()
-        else:
-            threading.Thread(target=self.generate_keys_and_encrypt, daemon=True).start()
+    def get_public_key(self, b64: bool = True):
+        return base64.b64encode(self.public_key).decode() if b64 else self.public_key
 
-    def generate_keys_and_encrypt(self) -> None:
-        try:
-            self.kem = oqs.KeyEncapsulation("ML-KEM-768")
-            self.kyber_public_key = self.kem.generate_keypair()
-            self.kyber_private_key = self.kem.export_secret_key()
-            print("[*] ML-KEM-768 keys generated successfully.")
+    def get_secret_key(self):
+        return self.secret_key
 
-            ciphertext, shared_secret = self.kem.encap_secret(self.kyber_public_key)
-
+    def derive_aes_key(self, shared_secret: bytes, salt: Optional[bytes] = None) -> bytes:
+        if not salt:
             salt = os.urandom(16)
-            aes_key = HKDF(
-                algorithm=hashes.SHA256(),
-                length=32,
-                salt=salt,
-                info=b"mlkem768_aes_key"
-            ).derive(shared_secret)
+        return HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            info=b"mlkem768_aes_key"
+        ).derive(shared_secret)
 
-            aesgcm = AESGCM(aes_key)
-            nonce = os.urandom(12)
-            encrypted = aesgcm.encrypt(nonce, self.data_to_encrypt.encode(), None)
+    def encrypt_data(self, plaintext: str) -> str:
+        ciphertext, shared_secret = self.kem.encap_secret(self.public_key)
+        salt = os.urandom(16)
+        aes_key = self.derive_aes_key(shared_secret, salt)
+        aesgcm = AESGCM(aes_key)
+        nonce = os.urandom(12)
+        encrypted = aesgcm.encrypt(nonce, plaintext.encode(), None)
 
-            encrypted_blob = {
-                "ciphertext": base64.b64encode(ciphertext).decode(),
-                "nonce": base64.b64encode(nonce).decode(),
-                "payload": base64.b64encode(encrypted).decode(),
-                "salt": base64.b64encode(salt).decode(),
-            }
+        blob = {
+            "ciphertext": base64.b64encode(ciphertext).decode(),
+            "nonce": base64.b64encode(nonce).decode(),
+            "payload": base64.b64encode(encrypted).decode(),
+            "salt": base64.b64encode(salt).decode(),
+        }
+        return base64.b64encode(json.dumps(blob).encode()).decode()
 
-            self.encrypted_data = base64.b64encode(json.dumps(encrypted_blob).encode()).decode()
-            print("[*] Data encrypted successfully.")
+    def decrypt_data(self, b64_blob: str) -> str:
+        blob = json.loads(base64.b64decode(b64_blob))
+        ciphertext = base64.b64decode(blob["ciphertext"])
+        nonce = base64.b64decode(blob["nonce"])
+        encrypted_payload = base64.b64decode(blob["payload"])
+        salt = base64.b64decode(blob["salt"])
 
-            self.decrypt_data()
-        except Exception as e:
-            print(f"[!] Encryption failed: {e}")
-        finally:
-            self._encryption_done.set()
+        self.kem.import_secret_key(self.secret_key)
+        shared_secret = self.kem.decap_secret(ciphertext)
+        aes_key = self.derive_aes_key(shared_secret, salt)
+        aesgcm = AESGCM(aes_key)
+        decrypted = aesgcm.decrypt(nonce, encrypted_payload, None)
+        return decrypted.decode()
 
-    def decrypt_data(self) -> None:
-        try:
-            self._encryption_done.wait()
+class NetworkProtector:
+    def __init__(self, sock, peer_kyber_pub_b64: str):
+        self.sock = sock
+        self.secure_random = random.SystemRandom()
+        self.peer_pub = base64.b64decode(peer_kyber_pub_b64)
 
-            if not self.kem:
-                self.kem = oqs.KeyEncapsulation("ML-KEM-768")
-                self.kem.import_secret_key(self.kyber_private_key)
+    def add_jitter(self, min_delay=0.05, max_delay=0.3):
+        jitter = self.secure_random.uniform(min_delay, max_delay)
+        time.sleep(jitter)
 
-            decoded_json = base64.b64decode(self.encrypted_data)
-            blob = json.loads(decoded_json)
+    def send_with_padding(self, data: bytes, min_padding=128, max_padding=256):
+        target_size = max(len(data), self.secure_random.randint(min_padding, max_padding))
+        pad_len = target_size - len(data)
+        padded_data = data + os.urandom(pad_len)
+        self.sock.sendall(padded_data)
 
-            ciphertext = base64.b64decode(blob["ciphertext"])
-            nonce = base64.b64decode(blob["nonce"])
-            encrypted_payload = base64.b64decode(blob["payload"])
-            salt = base64.b64decode(blob["salt"])
+    def send_protected(self, data: bytes):
+        self.add_jitter()
+        encrypted = self.encrypt_data_kyber768(data)
+        self.send_with_padding(encrypted)
 
-            if len(nonce) != 12:
-                raise ValueError(f"Nonce length is invalid: {len(nonce)} (expected 12 bytes).")
+    def encrypt_data_kyber768(self, data: bytes) -> bytes:
+        kem = oqs.KeyEncapsulation("ML-KEM-768")
+        ciphertext, shared_secret = kem.encap_secret(self.peer_pub)
 
-            shared_secret = self.kem.decap_secret(ciphertext)
+        salt = os.urandom(16)
+        nonce = os.urandom(12)
+        aes_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            info=b"darkelf-transport"
+        ).derive(shared_secret)
 
-            aes_key = HKDF(
-                algorithm=hashes.SHA256(),
-                length=32,
-                salt=salt,
-                info=b"mlkem768_aes_key"
-            ).derive(shared_secret)
+        aesgcm = AESGCM(aes_key)
+        encrypted_payload = aesgcm.encrypt(nonce, data, None)
 
-            aesgcm = AESGCM(aes_key)
-            decrypted = aesgcm.decrypt(nonce, encrypted_payload, None)
+        packet = {
+            "ciphertext": base64.b64encode(ciphertext).decode(),
+            "nonce": base64.b64encode(nonce).decode(),
+            "payload": base64.b64encode(encrypted_payload).decode(),
+            "salt": base64.b64encode(salt).decode(),
+            "version": 1
+        }
 
-            self.decrypted_data = decrypted.decode()
-            print("[*] Data decrypted successfully.")
-        except Exception as e:
-            print(f"[!] Decryption failed: {e}")
+        return base64.b64encode(json.dumps(packet).encode())
 
-    def get_encrypted_data(self) -> Optional[str]:
-        self._encryption_done.wait()
-        return self.encrypted_data
+class KyberReceiver:
+    def __init__(self, priv_key_bytes: bytes):
+        self.kem = oqs.KeyEncapsulation("ML-KEM-768")
+        self.kem.import_secret_key(priv_key_bytes)
 
-    def get_decrypted_data(self) -> Optional[str]:
-        self._encryption_done.wait()
-        return self.decrypted_data
+    def decrypt(self, b64_packet: bytes) -> bytes:
+        packet = json.loads(base64.b64decode(b64_packet).decode())
+        ciphertext = base64.b64decode(packet["ciphertext"])
+        nonce = base64.b64decode(packet["nonce"])
+        salt = base64.b64decode(packet["salt"])
+        payload = base64.b64decode(packet["payload"])
 
-    def get_public_key(self) -> Optional[bytes]:
-        return self.kyber_public_key
+        shared_secret = self.kem.decap_secret(ciphertext)
+        aes_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            info=b"darkelf-transport"
+        ).derive(shared_secret)
 
-    def get_private_key(self) -> Optional[bytes]:
-        return self.kyber_private_key
-        
+        aesgcm = AESGCM(aes_key)
+        return aesgcm.decrypt(nonce, payload, None)
+
 class EncryptedLoggerMLKEM768:
     def __init__(self):
         self.lock = threading.Lock()
@@ -838,6 +859,7 @@ class PQCryptoAPI(QObject):
             return self.kyber.decrypt_base64(encrypted_data_b64)
         except Exception as e:
             return f"Decryption failed: {str(e)}"
+
             
 # === Enhanced ML Detection & Integration for CustomWebEnginePage ===
 class CustomWebEnginePage(QWebEnginePage):
@@ -3049,7 +3071,7 @@ class Darkelf(QMainWindow):
         self.monitor_timer = None
         
         # --- Synchronous ML-KEM 768 key manager ---
-        self.kyber_manager = MLKEM768Manager(sync=False)
+        self.kyber_manager = KyberManager()
         # Print confirmation in main thread
         print("MLKEM768Manager created in Darkelf.")
 
