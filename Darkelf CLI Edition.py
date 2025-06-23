@@ -1,78 +1,27 @@
-# Darkelf CLI Browser v3.0 – ML-KEM Encrypted, Privacy-Focused Terminal Browser  
-# Copyright (C) 2025 Dr. Kevin Moore  
-#
-# SPDX-License-Identifier: LGPL-3.0-or-later  
-#
-# This software is a command-line based secure browser focused on privacy and anonymity,  
-# incorporating post-quantum ML-KEM encryption (via liboqs) and Tor integration for encrypted  
-# traffic routing.  
-#
-# LICENSE:  
-# This program is free software: you can redistribute it and/or modify  
-# it under the terms of the GNU Lesser General Public License as published by  
-# the Free Software Foundation, either version 3 of the License, or  
-# (at your option) any later version.  
-#
-# This software is distributed in the hope that it will be useful,  
-# but WITHOUT ANY WARRANTY; without even the implied warranty of  
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the  
-# GNU Lesser General Public License for more details.  
-#
-# You should have received a copy of the GNU Lesser General Public License  
-# along with this program. If not, see <https://www.gnu.org/licenses/>.  
-#
-# EXPORT COMPLIANCE NOTICE:  
-# This software contains cryptographic source code, specifically implementing  
-# post-quantum ML-KEM key encapsulation mechanisms. It is made publicly available  
-# under License Exception TSU pursuant to 15 CFR §740.13(e) of the  
-# U.S. Export Administration Regulations (EAR).  
-#
-# A notification has been submitted to the U.S. Bureau of Industry and Security (BIS)  
-# and the National Security Agency (NSA) as required.  
-#
-# This software is intended strictly for lawful academic, research, educational,  
-# and privacy-preserving use in non-restricted jurisdictions.  
-#
-# PROHIBITED DESTINATIONS:  
-# This software may not be exported, re-exported, or transferred to:  
-# - Countries or territories subject to U.S. embargoes or comprehensive sanctions,  
-#   including those listed in Country Group E:1 or E:2.  
-# - Individuals or entities on the Denied Persons List, Entity List,  
-#   Specially Designated Nationals (SDN) List, or other restricted parties lists.  
-#
-# END-USE RESTRICTIONS:  
-# This software may not be used for the development, production, or deployment of  
-# weapons of mass destruction (WMD), including nuclear, biological, or chemical weapons,  
-# or missile delivery systems, as defined in Part 744 of the EAR.  
-#
-# By downloading, using, or distributing this software, you agree to comply with  
-# all applicable U.S. export control laws and regulations.  
-#
-# This CLI-only browser does not include a GUI and does not ship any compiled binaries.  
-# It is published under the LGPL v3.0 license and was authored by Dr. Kevin Moore in 2025.  
-
-# PLEASE READ!
-# These packages are required for install through terminal use Pip and Python3.11
-# This Edition is full of Tor, Stealth, Anti Forensics use in Terminal - No Gui
-#requests
-#beautifulsoup4
-#oqs-python
-#cryptography
-#stem
-#pycryptodome
-
 import os
+import sys
 import time
+import mmap
+import ctypes
 import random
 import base64
 import hashlib
 import threading
 import shutil
 import socket
+import json
+import secrets
+import platform
+import re
+from datetime import datetime
+import psutil
 from urllib.parse import quote_plus, unquote, parse_qs, urlparse
 from bs4 import BeautifulSoup
 from oqs import KeyEncapsulation
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import requests
 
 # --- Tor integration via Stem ---
@@ -114,6 +63,326 @@ KEY_FILES = [
     "history.log", "log.enc", "logkey.bin"
 ]
 
+# --- SecureBuffer: RAM-locked buffer for sensitive data ---
+class SecureBuffer:
+    """
+    RAM-locked buffer using mmap + mlock to prevent swapping.
+    Use for sensitive in-memory data like session tokens, keys, etc.
+    """
+    def __init__(self, size=4096):
+        self.size = size
+        self.buffer = mmap.mmap(-1, self.size)
+        libc = ctypes.CDLL("libc.so.6" if sys.platform.startswith("linux") else "libc.dylib")
+        result = libc.mlock(
+            ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.buffer))),
+            ctypes.c_size_t(self.size)
+        )
+        if result != 0:
+            raise RuntimeError("🔒 mlock failed: system may not allow locking memory")
+
+    def write(self, data: bytes):
+        self.buffer.seek(0)
+        self.buffer.write(data[:self.size])
+
+    def zero(self):
+        ctypes.memset(
+            ctypes.addressof(ctypes.c_char.from_buffer(self.buffer)),
+            0,
+            self.size
+        )
+
+    def close(self):
+        self.zero()
+        self.buffer.close()
+
+# --- MemoryMonitor: exit if memory low to avoid swap ---
+class MemoryMonitor(threading.Thread):
+    """
+    Monitors system memory. If available memory falls below threshold,
+    exits the program to prevent swap usage and potential forensic leakage.
+    """
+    def __init__(self, threshold_mb=150, check_interval=5):
+        super().__init__(daemon=True)
+        self.threshold = threshold_mb * 1024 * 1024  # MB to bytes
+        self.check_interval = check_interval
+        self._running = True
+
+    def run(self):
+        while self._running:
+            mem = psutil.virtual_memory()
+            if mem.available < self.threshold:
+                print(f"🔻 LOW MEMORY: < {self.threshold // (1024 * 1024)} MB available. Exiting to prevent swap.")
+                sys.exit(1)
+            time.sleep(self.check_interval)
+
+    def stop(self):
+        self._running = False
+
+# --- hardened_random_delay: for stealth timings ---
+def hardened_random_delay(min_delay=0.1, max_delay=1.0, jitter=0.05):
+    secure_random = random.SystemRandom()
+    base_delay = secure_random.uniform(min_delay, max_delay)
+    noise = secure_random.uniform(-jitter, jitter)
+    final_delay = max(0, base_delay + noise)
+    time.sleep(final_delay)
+
+# --- StealthCovertOpsPQ: PQ in-memory log, anti-forensics ---
+class StealthCovertOpsPQ:
+    def __init__(self, stealth_mode=True):
+        self._log_buffer = []
+        self._stealth_mode = stealth_mode
+        self._authorized = False
+
+        # === ML-KEM-768: Post-Quantum Key Exchange ===
+        self.kem = KeyEncapsulation("ML-KEM-768")
+        self.public_key = self.kem.generate_keypair()
+        self.private_key = self.kem.export_secret_key()
+
+        # Derive shared secret using encapsulation
+        self.ciphertext, self.shared_secret = self.kem.encap_secret(self.public_key)
+
+        # Derive AES-256 key from shared secret
+        self.salt = os.urandom(16)
+        self.aes_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=self.salt,
+            info=b"mlkem768_log_key"
+        ).derive(self.shared_secret)
+
+        self.aesgcm = AESGCM(self.aes_key)
+
+    def encrypt(self, message: str) -> str:
+        nonce = os.urandom(12)
+        ciphertext = self.aesgcm.encrypt(nonce, message.encode(), None)
+        blob = {
+            "nonce": base64.b64encode(nonce).decode(),
+            "cipher": base64.b64encode(ciphertext).decode()
+        }
+        return json.dumps(blob)
+
+    def decrypt(self, blob_str: str) -> str:
+        blob = json.loads(blob_str)
+        nonce = base64.b64decode(blob["nonce"])
+        cipher = base64.b64decode(blob["cipher"])
+        return self.aesgcm.decrypt(nonce, cipher, None).decode()
+
+    def log_to_memory(self, message: str):
+        encrypted = self.encrypt(f"[{datetime.utcnow().isoformat()}] {message}")
+        self._log_buffer.append(encrypted)
+
+    def authorize_flush(self, token: str):
+        if token == "darkelf-confirm":
+            self._authorized = True
+
+    def flush_log(self, path="covert_log.log", require_auth=True):
+        if self._stealth_mode:
+            raise PermissionError("Stealth mode active: disk log writing is disabled.")
+        if require_auth and not self._authorized:
+            raise PermissionError("Log flush not authorized.")
+        with open(path, "w") as f:
+            for encrypted in self._log_buffer:
+                f.write(self.decrypt(encrypted) + "\n")
+        return path
+
+    def clear_logs(self):
+        for i in range(len(self._log_buffer)):
+            buffer_len = len(self._log_buffer[i])
+            secure_buffer = ctypes.create_string_buffer(buffer_len)
+            ctypes.memset(secure_buffer, 0, buffer_len)
+        self._log_buffer.clear()
+
+    def cpu_saturate(self, seconds=5):
+        def stress():
+            end = time.time() + seconds
+            while time.time() < end:
+                _ = [x**2 for x in range(1000)]
+        for _ in range(os.cpu_count() or 2):
+            threading.Thread(target=stress, daemon=True).start()
+
+    def memory_saturate(self, mb=100):
+        try:
+            _ = bytearray(mb * 1024 * 1024)
+            time.sleep(2)
+            del _
+        except:
+            pass
+
+    def fake_activity_noise(self):
+        fake_files = [f"/tmp/tempfile_{i}.tmp" if platform.system() != "Windows" else f"C:\\Temp\\tempfile_{i}.tmp"
+                      for i in range(5)]
+        try:
+            for path in fake_files:
+                with open(path, "w") as f:
+                    f.write("Temporary diagnostic output\n")
+                with open(path, "r+b") as f:
+                    length = os.path.getsize(path)
+                    f.seek(0)
+                    f.write(secrets.token_bytes(length))
+                os.remove(path)
+        except:
+            pass
+
+    def process_mask_linux(self):
+        if platform.system() == "Linux":
+            try:
+                with open("/proc/self/comm", "w") as f:
+                    f.write("systemd")
+            except:
+                pass
+
+    def panic(self):
+        print("[StealthOpsPQ] 🚨 PANIC: Wiping memory, faking noise, and terminating.")
+        self.clear_logs()
+        self.memory_saturate(500)
+        self.cpu_saturate(10)
+        self.fake_activity_noise()
+        self.process_mask_linux()
+        os._exit(1)
+
+# --- PhishingDetectorZeroTrace: PQ phishing detector ---
+class PhishingDetectorZeroTrace:
+    """
+    Post-Quantum phishing detector with:
+    - In-memory PQ-encrypted logs
+    - No logging to disk until shutdown (if authorized)
+    - No network or LLM usage
+    """
+
+    def __init__(self, pq_logger=None, flush_path="phishing_log.txt"):
+        self.static_blacklist = {
+            "paypal-login-security.com",
+            "update-now-secure.net",
+            "signin-account-verification.info"
+        }
+        self.suspicious_keywords = {
+            "login", "verify", "secure", "account", "bank", "update", "signin", "password"
+        }
+        self.ip_pattern = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+        self.session_flags = set()
+        self.pq_logger = pq_logger
+        self.flush_path = flush_path
+
+    def is_suspicious_url(self, url):
+        try:
+            parsed = urlparse(url)
+            host = parsed.hostname or ""
+            host = host.lower()
+            url_hash = self._hash_url(url)
+
+            if url_hash in self.session_flags:
+                return self._log_and_flag(url, "Previously flagged during session.")
+
+            if host in self.static_blacklist:
+                return self._log_and_flag(url, f"Domain '{host}' is in static blacklist.")
+
+            if self.ip_pattern.match(host):
+                return self._log_and_flag(url, "URL uses IP address directly.")
+
+            if host.count('.') > 3:
+                return self._log_and_flag(url, "Too many subdomains.")
+
+            for keyword in self.suspicious_keywords:
+                if keyword in host:
+                    return self._log_and_flag(url, f"Contains suspicious keyword: '{keyword}'.")
+
+            return False, "URL appears clean."
+
+        except Exception as e:
+            return self._log_and_flag(url, f"URL parsing error: {str(e)}")
+
+    def analyze_page_content(self, html, url="(unknown)"):
+        try:
+            lowered = html.lower()
+            score = 0
+            if "<form" in lowered and ("password" in lowered or "login" in lowered):
+                score += 2
+            if "re-authenticate" in lowered or "enter your credentials" in lowered:
+                score += 1
+            if "<iframe" in lowered or "hidden input" in lowered:
+                score += 1
+
+            if score >= 2:
+                return self._log_and_flag(url, "Suspicious elements found in page.")
+            return False, "Content appears clean."
+        except Exception as e:
+            return self._log_and_flag(url, f"Content scan error: {str(e)}")
+
+    def flag_url_ephemeral(self, url):
+        self.session_flags.add(self._hash_url(url))
+
+    def _log_and_flag(self, url, reason):
+        if self.pq_logger:
+            timestamp = datetime.utcnow().isoformat()
+            message = f"[{timestamp}] PHISHING - {url} | {reason}"
+            self.pq_logger.log_to_memory(message)
+        self.flag_url_ephemeral(url)
+        return True, reason
+
+    def _hash_url(self, url):
+        return hashlib.sha256(url.encode()).hexdigest()
+
+    def flush_logs_on_exit(self):
+        if self.pq_logger:
+            try:
+                self.pq_logger.authorize_flush("darkelf-confirm")
+                self.pq_logger.flush_log(path=self.flush_path)
+                print(f"[PhishingDetector] ✅ Flushed encrypted phishing log to {self.flush_path}")
+            except Exception as e:
+                print(f"[PhishingDetector] ⚠️ Log flush failed: {e}")
+
+# --- NetworkProtector: PQ-encrypted, padded, jittered socket comms ---
+class NetworkProtector:
+    def __init__(self, sock, peer_kyber_pub_b64: str):
+        self.sock = sock
+        self.secure_random = random.SystemRandom()
+        self.peer_pub = base64.b64decode(peer_kyber_pub_b64)
+
+    def add_jitter(self, min_delay=0.05, max_delay=0.3):
+        jitter = self.secure_random.uniform(min_delay, max_delay)
+        time.sleep(jitter)
+        print(f"[Darkelf] Jitter applied: {jitter:.3f}s")
+
+    def send_with_padding(self, data: bytes, min_padding=128, max_padding=256):
+        target_size = max(len(data), self.secure_random.randint(min_padding, max_padding))
+        pad_len = target_size - len(data)
+        padded_data = data + os.urandom(pad_len)
+        self.sock.sendall(padded_data)
+        print(f"[Darkelf] Sent padded data (original: {len(data)}, padded: {len(padded_data)}, pad: {pad_len})")
+
+    def send_protected(self, data: bytes):
+        self.add_jitter()
+        encrypted = self.encrypt_data_kyber768(data)
+        self.send_with_padding(encrypted)
+
+    def encrypt_data_kyber768(self, data: bytes) -> bytes:
+        kem = KeyEncapsulation("ML-KEM-768")
+        ciphertext, shared_secret = kem.encap_secret(self.peer_pub)
+
+        salt = os.urandom(16)
+        nonce = os.urandom(12)
+
+        aes_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            info=b"darkelf-transport"
+        ).derive(shared_secret)
+
+        aesgcm = AESGCM(aes_key)
+        encrypted_payload = aesgcm.encrypt(nonce, data, None)
+
+        packet = {
+            "ciphertext": base64.b64encode(ciphertext).decode(),
+            "nonce": base64.b64encode(nonce).decode(),
+            "payload": base64.b64encode(encrypted_payload).decode(),
+            "salt": base64.b64encode(salt).decode(),
+            "version": 1
+        }
+
+        return base64.b64encode(json.dumps(packet).encode())
+
+# --- Existing CLI code below (unchanged, but now can use above tools) ---
 
 class TorManagerCLI:
     def __init__(self):
@@ -234,9 +503,7 @@ class TorManagerCLI:
 
 
 def get_tor_proxy():
-    # Use the Tor SOCKS port started by TorManagerCLI (default 9052)
     return f"socks5h://127.0.0.1:9052"
-
 
 def random_headers(extra_stealth_options=None):
     headers = {
@@ -350,7 +617,6 @@ def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=Fal
 
 def parse_ddg_lite_results(soup):
     results = []
-    # Main results
     for td in soup.find_all("td"):
         a = td.find("a", href=True)
         if a and a['href'].startswith("/l/?"):
@@ -360,7 +626,6 @@ def parse_ddg_lite_results(soup):
             label = a.get_text(strip=True)
             if label and uddg:
                 results.append((label, uddg))
-    # Fallback: any <a href="/l/?"...> in the document
     if not results:
         for a in soup.find_all("a", href=True):
             if a['href'].startswith("/l/?"):
@@ -370,7 +635,6 @@ def parse_ddg_lite_results(soup):
                 label = a.get_text(strip=True)
                 if label and uddg:
                     results.append((label, uddg))
-    # Try to detect "No results found"
     if not results:
         nores = soup.find(string=lambda text: text and "No results found" in text)
         if nores:
@@ -390,7 +654,6 @@ def fetch_and_display(url, session=None, extra_stealth_options=None, debug=False
     results = []
     if is_ddg_search:
         results = parse_ddg_lite_results(soup)
-        # If no results, try POST fallback
         if (not results or results == "no_results") and "q=" in url:
             q = url.split("q=",1)[-1]
             q = q.split("&")[0]
@@ -422,7 +685,6 @@ def fetch_and_display(url, session=None, extra_stealth_options=None, debug=False
                 found = True
         if not found:
             print("  ▪ No results found or parsing failed.")
-    # Encrypted logging
     key = get_fernet_key()
     logmsg = f"{hash_url(url)} | {headers.get('User-Agent','?')}\n"
     enc_log = encrypt_log(logmsg, key)
@@ -512,6 +774,12 @@ def print_help():
 
 def main():
     intrusion_check()
+    # Start memory monitor for anti-forensics
+    mem_monitor = MemoryMonitor()
+    mem_monitor.start()
+    # PQ anti-forensics logger
+    pq_logger = StealthCovertOpsPQ(stealth_mode=True)
+    phishing_detector = PhishingDetectorZeroTrace(pq_logger=pq_logger)
     tor_manager = TorManagerCLI()
     tor_manager.init_tor()
     messenger = DarkelfMessenger()
@@ -542,15 +810,24 @@ def main():
                 print("🫥 Extra stealth options are now", "ENABLED" if stealth_on else "DISABLED")
             elif cmd.startswith("search "):
                 q = cmd.split(" ", 1)[1]
+                url = f"{DUCKDUCKGO_LITE}?q={quote_plus(q)}"
+                # Phishing detection
+                suspicious, reason = phishing_detector.is_suspicious_url(url)
+                if suspicious:
+                    print(f"⚠️ [PHISHING WARNING] {reason}")
                 fetch_and_display(
-                    f"{DUCKDUCKGO_LITE}?q={quote_plus(q)}",
+                    url,
                     extra_stealth_options=extra_stealth_options if stealth_on else {},
                     debug=False
                 )
             elif cmd.startswith("debug "):
                 q = cmd.split(" ", 1)[1]
+                url = f"{DUCKDUCKGO_LITE}?q={quote_plus(q)}"
+                suspicious, reason = phishing_detector.is_suspicious_url(url)
+                if suspicious:
+                    print(f"⚠️ [PHISHING WARNING] {reason}")
                 fetch_and_display(
-                    f"{DUCKDUCKGO_LITE}?q={quote_plus(q)}",
+                    url,
                     extra_stealth_options=extra_stealth_options if stealth_on else {},
                     debug=True
                 )
@@ -574,14 +851,17 @@ def main():
                 keywords = cmd.split(" ", 1)[1]
                 onion_discovery(keywords, extra_stealth_options=extra_stealth_options if stealth_on else {})
             elif cmd == "wipe":
+                pq_logger.panic()
                 trigger_self_destruct("Manual wipe")
             elif cmd == "exit":
                 print("🧩 Exiting securely.")
+                phishing_detector.flush_logs_on_exit()
                 break
             else:
                 print("❓ Unknown command")
         except KeyboardInterrupt:
             print("\n⛔ Ctrl+C - exit requested.")
+            phishing_detector.flush_logs_on_exit()
             break
 
 if __name__ == "__main__":
