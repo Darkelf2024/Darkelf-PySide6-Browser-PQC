@@ -19,6 +19,8 @@ Darkelf Vault Browser uses PyQt5 Super Stealth - Head to other Repo
 - Post Quantum Encrypted Messaging Coming!
 - TLS utilizes X25519/Post Quantum Logic, Ai, PQCryptApi
 
+Darkelf CLI Edition Released: No Gui Download Here [Darkelf CLI](https://github.com/Darkelf2024/Darkelf-Browser-v3-PQC/blob/main/Darkelf%20CLI%20Edition.py) Enjoy! Minimal and Packs a Punch!
+
 Darkelf Vault PyQt5: This browser uses ML-KEM-768 for encrypted messaging key storage and secure buffer operations. TLS traffic remains X25519-based due to current web standard constraints!
 
 Download Here [Darkelf Vault Browser](https://github.com/Darkelf2024/Darkelf-Browser-v3-PQC/blob/main/Darkelf%20Vault%20Browser.py) This doesn't have the Kernel Monitor Integration!
