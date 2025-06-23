@@ -100,6 +100,8 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
+from bs4 import BeautifulSoup
+from oqs import KeyEncapsulation
 from PIL import Image
 import piexif
 import tls_client  # Requires: pip install tls-client
@@ -145,6 +147,190 @@ from PyQt5.QtCore import (
     pyqtSignal, QThread
 )
 
+# This is placed here - I will be integrating the second phase later this week plugging into Darkelf Class: I am running tests getting it production ready!
+class DarkelfMessenger:
+    def __init__(self):
+        self.kem_algo = "ML-KEM-768"
+
+    def generate_keys(self):
+        kem = KeyEncapsulation(self.kem_algo)
+        pub = kem.generate_keypair()
+        with open("my_pubkey.bin", "wb") as f:
+            f.write(pub)
+        with open("my_privkey.bin", "wb") as f:
+            f.write(kem.export_secret_key())
+        print("🔐 Keys created: my_pubkey.bin / my_privkey.bin")
+
+    def send_message(self, recipient_pubkey_path, message_text, output_path="msg.dat"):
+        kem = KeyEncapsulation(self.kem_algo)
+        with open(recipient_pubkey_path, "rb") as f:
+            pubkey = f.read()
+        ciphertext, shared_secret = kem.encap_secret(pubkey)
+        key = base64.urlsafe_b64encode(shared_secret[:32])
+        token = Fernet(key).encrypt(message_text.encode())
+        with open(output_path, "wb") as f:
+            f.write(ciphertext + b'||' + token)
+        print("📤 Message encrypted →", output_path)
+
+    def receive_message(self, my_privkey_path="my_privkey.bin", msg_path="msg.dat"):
+        kem = KeyEncapsulation(self.kem_algo)
+        with open(my_privkey_path, "rb") as f:
+            kem.import_secret_key(f.read())
+        with open(msg_path, "rb") as f:
+            ciphertext, token = f.read().split(b'||')
+        shared_secret = kem.decap_secret(ciphertext)
+        key = base64.urlsafe_b64encode(shared_secret[:32])
+        message = Fernet(key).decrypt(token)
+        print("📥 Message decrypted →", message.decode())
+        return message.decode()
+
+    def deliver_over_tor(self, onion_url="http://exampleonion/upload", msg_path="msg.dat"):
+        try:
+            proxies = {
+                'http': 'socks5h://127.0.0.1:9052',
+                'https': 'socks5h://127.0.0.1:9052',
+            }
+            with open(msg_path, "rb") as f:
+                files = {'file': f}
+                r = requests.post(onion_url, files=files, proxies=proxies, timeout=15)
+                print("🚀 Sent via Tor:", r.status_code)
+        except Exception as e:
+            print("❌ Tor delivery failed:", e)
+
+def start_message_watcher():
+    def watch():
+        messenger = DarkelfMessenger()
+        while True:
+            if os.path.exists("msg.dat"):
+                try:
+                    msg = messenger.receive_message()
+                    print("📨 [Auto Received]:", msg)
+                    os.remove("msg.dat")
+                except Exception as e:
+                    print("⚠️ Message receive failed:", e)
+            time.sleep(5)
+
+    threading.Thread(target=watch, daemon=True).start()
+
+class DarkelfKernelMonitor(threading.Thread):
+    """
+    Monitors kernel state and flags forensic-risk activity (e.g., swap use).
+    Instead of force shutdown, it sets a cleanup flag and performs secure wipe on exit.
+    """
+
+    def __init__(self, check_interval=5, parent_app=None):
+        super().__init__(daemon=True)
+        self.check_interval = check_interval
+        self.parent_app = parent_app
+        self.initial_fingerprint = self.system_fingerprint()
+        self._last_swap_active = None
+        self._last_pager_state = None
+        self._last_fingerprint_hash = hash(str(self.initial_fingerprint))
+        self.cleanup_required = False
+
+    def run(self):
+        while True:
+            time.sleep(self.check_interval)
+
+            # Swap monitoring
+            swap_now = self.swap_active()
+            if swap_now != self._last_swap_active:
+                if swap_now:
+                    print("❌ [DarkelfKernelMonitor] Swap is ACTIVE — marking cleanup required!")
+                    self.kill_dynamic_pager()
+                    self.cleanup_required = True
+                else:
+                    print("✅ [DarkelfKernelMonitor] Swap is OFF")
+                self._last_swap_active = swap_now
+
+            # Dynamic pager monitoring
+            pager_now = self.dynamic_pager_running()
+            if pager_now != self._last_pager_state:
+                if pager_now:
+                    print("❌ [DarkelfKernelMonitor] dynamic_pager is RUNNING — potential memory leak risk!")
+                else:
+                    print("✅ [DarkelfKernelMonitor] dynamic_pager is not running")
+                self._last_pager_state = pager_now
+
+            # Kernel fingerprint monitoring
+            current_fingerprint = self.system_fingerprint()
+            if hash(str(current_fingerprint)) != self._last_fingerprint_hash:
+                print("⚠️ [DarkelfKernelMonitor] Kernel config changed — setting cleanup required!")
+                self.cleanup_required = True
+                self._last_fingerprint_hash = hash(str(current_fingerprint))
+
+    def swap_active(self):
+        try:
+            output = subprocess.check_output(['sysctl', 'vm.swapusage'], stderr=subprocess.DEVNULL).decode()
+            return "used = 0.00M" not in output
+        except Exception:
+            return False
+
+    def dynamic_pager_running(self):
+        try:
+            output = subprocess.check_output(['ps', 'aux'], stderr=subprocess.DEVNULL).decode().lower()
+            return "dynamic_pager" in output
+        except Exception:
+            return False
+
+    def kill_dynamic_pager(self):
+        try:
+            subprocess.run(["sudo", "launchctl", "bootout", "system", "/System/Library/LaunchDaemons/com.apple.dynamic_pager.plist"], check=True)
+            print("🔒 [DarkelfKernelMonitor] dynamic_pager disabled")
+        except subprocess.CalledProcessError:
+            print("⚠️ [DarkelfKernelMonitor] Failed to disable dynamic_pager")
+
+    def secure_delete_swap(self):
+        try:
+            subprocess.run(["sudo", "rm", "-f", "/private/var/vm/swapfile*"], check=True)
+            print("🧨 [DarkelfKernelMonitor] Swap files removed")
+        except Exception as e:
+            print(f"⚠️ [DarkelfKernelMonitor] Failed to remove swapfiles: {e}")
+
+    def secure_purge_darkelf_vault(self):
+        # Securely overwrite and delete known vault scripts
+        vault_paths = [
+            os.path.expanduser("~/Darkelf/Darkelf Vault Browser.py"),
+            os.path.expanduser("~/Desktop/Darkelf Vault Browser.py"),
+            "/usr/local/bin/Darkelf Vault Browser.py",
+            "/usr/local/bin/Darkelf Vault TL Edition.py",
+            "/opt/darkelf/Darkelf Vault Browser.py",
+            "/opt/darkelf/Darkelf Vault TL Edition.py"
+        ]
+        for path in vault_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, "ba+", buffering=0) as f:
+                        length = f.tell()
+                        f.seek(0)
+                        f.write(secrets.token_bytes(length))
+                    os.remove(path)
+                    print(f"💥 [DarkelfKernelMonitor] Vault destroyed: {path}")
+                except Exception as e:
+                    print(f"⚠️ Failed to delete {path}: {e}")
+
+    def shutdown_darkelf(self):
+        print("💣 [DarkelfKernelMonitor] Darkelf app shutdown initiated.")
+        if self.cleanup_required:
+            self.secure_delete_swap()
+            self.secure_purge_darkelf_vault()
+
+        if self.parent_app:
+            QTimer.singleShot(0, self.parent_app.quit)
+        else:
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    def system_fingerprint(self):
+        keys = ["kern.osrevision", "kern.osversion", "kern.bootargs"]
+        results = {}
+        for key in keys:
+            try:
+                val = subprocess.check_output(['sysctl', key], stderr=subprocess.DEVNULL).decode().strip()
+                results[key] = val
+            except Exception:
+                results[key] = "ERROR"
+        return results
+        
 class HeaderInterceptor(QWebEngineUrlRequestInterceptor):
     def interceptRequest(self, info):
         # Spoofed or poisoned headers
@@ -3138,6 +3324,8 @@ class Darkelf(QMainWindow):
 
     def log_stealth(self, message):
         try:
+            if not self.log_path or not os.path.exists(self.log_path):
+                return  # Don't recreate log files once deleted
             with open(self.log_path, "a") as f:
                 f.write(f"[{datetime.utcnow()}] {message}\n")
         except Exception:
@@ -3318,6 +3506,27 @@ class Darkelf(QMainWindow):
                     self.self_destruct()
         except Exception as e:
             self.log_stealth(f"Error checking tools: {e}")
+            
+    def _is_tracelabs_ova(self):
+        try:
+            hostname = socket.gethostname().lower()
+            if "tracelabs" in hostname or "parrot" in hostname:
+                return True
+
+            if os.path.exists("/etc/os-release"):
+                with open("/etc/os-release", "r") as f:
+                    os_release = f.read().lower()
+                    if "kali" in os_release or "parrot" in os_release:
+                        return True
+
+            uname_release = os.uname().release.lower()
+            if "kali" in uname_release or "parrot" in uname_release:
+                return True
+
+        except Exception as e:
+            self.log_stealth(f"Error checking OVA environment: {e}")
+
+        return False
 
     def _check_process_hash(self, path):
         known_hashes = {
@@ -3525,7 +3734,7 @@ class Darkelf(QMainWindow):
             except Exception as bridge_error:
                 print("[Darkelf] Bridge connection failed:", bridge_error)
 
-                if not getattr(self, "allow_direct_fallback", False):
+                if not getattr(self, "allow_direct_fallback", True):
                     QMessageBox.critical(self, "Tor Bridge Error", "Bridge connection failed and direct fallback is disabled.")
                     return  # Stop here if fallback not allowed
 
@@ -4137,23 +4346,41 @@ class Darkelf(QMainWindow):
     def closeEvent(self, event):
         """Secure shutdown with memory wipe, file deletion, and anti-forensics measures."""
         try:
-            if hasattr(self, 'log_path') and os.path.exists(self.log_path):
-                self.log_stealth("Initiating clean shutdown...")
+            # Secure delete logs FIRST and disable logging
+            if hasattr(self, 'log_path'):
+                if os.path.isfile(self.log_path):
+                    self.secure_delete(self.log_path)
+                elif os.path.isdir(self.log_path):
+                    self.secure_delete_directory(self.log_path)
+
+            stealth_log_path = os.path.expanduser("~/.darkelf_log")
+            if os.path.exists(stealth_log_path):
+                try:
+                    with open(stealth_log_path, "r+b", buffering=0) as f:
+                        length = os.path.getsize(stealth_log_path)
+                        for _ in range(5):
+                            f.seek(0)
+                            f.write(secrets.token_bytes(length))
+                            f.flush()
+                            os.fsync(f.fileno())
+                    os.remove(stealth_log_path)
+                except Exception:
+                    pass
+
+            # Disable logging after logs are deleted
+            self.log_stealth = lambda *args, **kwargs: None
 
             self.check_forensic_environment()
 
-            # Stop Tor if active
             if hasattr(self, 'tor_manager') and callable(getattr(self.tor_manager, 'stop_tor', None)):
                 self.tor_manager.stop_tor()
 
-            # Wipe memory-based encrypted cookie store
             if hasattr(self, 'encrypted_store'):
                 self.encrypted_store.wipe_memory()
 
             self.save_settings()
             self.secure_clear_cache_and_history()
 
-            # Stop download timers
             if hasattr(self, 'download_manager') and hasattr(self.download_manager, 'timers'):
                 for timer in self.download_manager.timers.values():
                     try:
@@ -4161,7 +4388,6 @@ class Darkelf(QMainWindow):
                     except Exception:
                         pass
 
-            # Close all tabs
             if hasattr(self, 'tab_widget'):
                 for i in reversed(range(self.tab_widget.count())):
                     widget = self.tab_widget.widget(i)
@@ -4179,7 +4405,6 @@ class Darkelf(QMainWindow):
                     widget.setParent(None)
                     widget.deleteLater()
 
-            # Close popouts
             if hasattr(self, 'web_views'):
                 for view in self.web_views:
                     try:
@@ -4194,7 +4419,6 @@ class Darkelf(QMainWindow):
                     view.setParent(None)
                     view.deleteLater()
 
-            # Close main view
             if hasattr(self, 'web_view'):
                 try:
                     page = self.web_view.page()
@@ -4214,137 +4438,106 @@ class Darkelf(QMainWindow):
             if hasattr(self, 'web_profile') and self.web_profile:
                 QTimer.singleShot(5000, lambda: self.web_profile.deleteLater())
 
-            # Clean RAM-based directory
             if hasattr(self, 'ram_path') and os.path.exists(self.ram_path):
                 self.secure_delete_ram_disk_directory(self.ram_path)
 
-            # Clean temp folder
             temp_subdir = os.path.join(tempfile.gettempdir(), "darkelf_temp")
             if os.path.exists(temp_subdir):
-                shutil.rmtree(temp_subdir, ignore_errors=True)
-                self.log_stealth(f"[✓] Securely deleted temp folder via rmtree: {temp_subdir}")
+                self.secure_delete_directory(temp_subdir)
 
-            # Cryptographic keys
             for keyfile in ["private_key.pem", "ecdh_private_key.pem"]:
                 if os.path.exists(keyfile):
                     self.secure_delete(keyfile)
 
-            # --- Begin: ML-KEM 768 (Kyber) key memory and file wipe ---
             try:
                 if hasattr(self, 'kyber_manager') and self.kyber_manager:
-                    # Overwrite private key in memory
-                    if hasattr(self.kyber_manager, 'kyber_private_key') and self.kyber_manager.kyber_private_key:
-                        priv = self.kyber_manager.kyber_private_key
-                        if isinstance(priv, (bytearray, bytes)):
-                            try:
-                                for i in range(len(priv)):
-                                    if isinstance(priv, bytearray):
-                                        priv[i] = 0
-                            except Exception:
-                                pass
-                        self.kyber_manager.kyber_private_key = None
-                    # Overwrite public key in memory
-                    if hasattr(self.kyber_manager, 'kyber_public_key') and self.kyber_manager.kyber_public_key:
-                        pub = self.kyber_manager.kyber_public_key
-                        if isinstance(pub, (bytearray, bytes)):
-                            try:
-                                for i in range(len(pub)):
-                                    if isinstance(pub, bytearray):
-                                        pub[i] = 0
-                            except Exception:
-                                pass
-                        self.kyber_manager.kyber_public_key = None
+                    for attr in ['kyber_private_key', 'kyber_public_key']:
+                        key = getattr(self.kyber_manager, attr, None)
+                        if isinstance(key, bytearray):
+                            for i in range(len(key)):
+                                key[i] = 0
+                        setattr(self.kyber_manager, attr, None)
                     self.kyber_manager.kem = None
 
-                # Secure erase Kyber key files if ever saved
-                for kyber_file in ["kyber_private.key", "kyber_public.key"]:
-                    if os.path.exists(kyber_file):
-                        self.secure_delete(kyber_file)
-            except Exception as e:
-                if hasattr(self, 'log_path') and os.path.exists(self.log_path):
-                    self.log_stealth(f"Error wiping ML-KEM keys: {e}")
-            # --- End: ML-KEM 1024 key wipe ---
-        
-            # Flush phishing logs (PQ-encrypted, memory-only)
+                    for kyber_file in ["kyber_private.key", "kyber_public.key"]:
+                        if os.path.exists(kyber_file):
+                            self.secure_delete(kyber_file)
+            except Exception:
+                pass
+
             if hasattr(self, 'phishing_detector'):
                 try:
                     self.phishing_detector.flush_logs_on_exit()
-                except Exception as e:
-                    self.log_stealth(f"[!] Error flushing phishing logs: {e}")
+                except Exception:
+                    pass
 
-            # Final: log
-            if hasattr(self, 'log_path') and os.path.exists(self.log_path):
-                self.secure_delete(self.log_path)
-
-        except Exception as e:
-            if hasattr(self, 'log_path') and os.path.exists(self.log_path):
-                self.log_stealth(f"Error during shutdown: {e}")
+        except Exception:
+            pass
         finally:
             super().closeEvent(event)
+
+    def secure_delete(self, file_path):
+        try:
+            if not os.path.exists(file_path):
+                return
+            size = os.path.getsize(file_path)
+            with open(file_path, "r+b", buffering=0) as f:
+                for _ in range(3):
+                    f.seek(0)
+                    f.write(secrets.token_bytes(size))
+                    f.flush()
+                    os.fsync(f.fileno())
+            os.remove(file_path)
+        except Exception:
+            pass  # Avoid any logging
+
 
     def secure_delete_directory(self, directory_path):
         try:
             if not os.path.exists(directory_path):
-                self.log_stealth(f"[!] Directory not found: {directory_path}")
                 return
-
             for root, dirs, files in os.walk(directory_path, topdown=False):
                 for name in files:
                     self.secure_delete(os.path.join(root, name))
                 for name in dirs:
                     try:
                         os.rmdir(os.path.join(root, name))
-                    except Exception as e:
-                        self.log_stealth(f"[!] Error removing subdir {name}: {e}")
-
+                    except Exception:
+                        pass
             os.rmdir(directory_path)
-            self.log_stealth(f"[✓] Securely deleted directory: {directory_path}")
-        except Exception as e:
-            self.log_stealth(f"[!] Error deleting directory {directory_path}: {e}")
+        except Exception:
+            pass
 
     def secure_delete_temp_memory_file(self, file_path):
         try:
-            if not isinstance(file_path, (str, bytes, os.PathLike)):
-                self.log_stealth(f"[!] Invalid temp file path: {type(file_path)}")
+            if not isinstance(file_path, (str, bytes, os.PathLike)) or not os.path.exists(file_path):
                 return
-
-            if not os.path.exists(file_path):
-                self.log_stealth(f"[!] Temp file not found: {file_path}")
-                return
-
-                file_size = os.path.getsize(file_path)
-
-                with open(file_path, "r+b", buffering=0) as f:
-                    for _ in range(3):
-                        f.seek(0)
-                        f.write(secrets.token_bytes(file_size))
-                        f.flush()
-                        os.fsync(f.fileno())
-
+            file_size = os.path.getsize(file_path)
+            with open(file_path, "r+b", buffering=0) as f:
+                for _ in range(3):
+                    f.seek(0)
+                    f.write(secrets.token_bytes(file_size))
+                    f.flush()
+                    os.fsync(f.fileno())
             os.remove(file_path)
-            self.log_stealth(f"[✓] Securely deleted temp file: {file_path}")
-        except Exception as e:
-            self.log_stealth(f"[!] Error deleting temp file {file_path}: {e}")
+        except Exception:
+            pass
 
     def secure_delete_ram_disk_directory(self, ram_dir_path):
         try:
             if not os.path.exists(ram_dir_path):
-                self.log_stealth(f"[!] RAM disk not found: {ram_dir_path}")
                 return
-
             for root, dirs, files in os.walk(ram_dir_path, topdown=False):
                 for name in files:
                     self.secure_delete_temp_memory_file(os.path.join(root, name))
                 for name in dirs:
                     try:
                         os.rmdir(os.path.join(root, name))
-                    except Exception as e:
-                        self.log_stealth(f"[!] Error removing RAM subdir {name}: {e}")
-
+                    except Exception:
+                        pass
             os.rmdir(ram_dir_path)
-            self.log_stealth(f"[✓] Wiped RAM disk: {ram_dir_path}")
-        except Exception as e:
-            self.log_stealth(f"[!] Error wiping RAM disk: {e}")
+        except Exception:
+            pass
 
     def handle_download(self, download_item):
         self.download_manager.handle_download(download_item)
@@ -4466,6 +4659,9 @@ def main():
         "--disk-cache-dir=/dev/null"
     )
 
+    kernel_monitor = DarkelfKernelMonitor(check_interval=5)
+    kernel_monitor.start()
+    
     QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
 
     # Create the application
