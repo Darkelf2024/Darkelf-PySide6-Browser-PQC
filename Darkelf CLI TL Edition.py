@@ -16,6 +16,7 @@ import secrets
 import platform
 import shlex
 import subprocess
+import oqs
 import re
 from datetime import datetime
 import psutil
@@ -627,38 +628,36 @@ def get_fernet_key():
     with open("logkey.bin", "rb") as f:
         return f.read()
 
-#!/usr/bin/env python3
-
-# Placeholder PQ KEM implementation – replace with a real PQC KEM!
 class KeyEncapsulation:
-    def __init__(self, algo):
+    def __init__(self, algo="ML-KEM-768"):
         self.algo = algo
+        self.kem = oqs.KeyEncapsulation(self.algo)
         self.privkey = None
         self.pubkey = None
 
     def generate_keypair(self):
-        # In production, use a real PQC KEM (e.g. from Open Quantum Safe)
-        self.privkey = os.urandom(64)
-        self.pubkey = os.urandom(64)
+        self.pubkey = self.kem.generate_keypair()
+        self.privkey = self.kem.export_secret_key()
         return self.pubkey
 
     def export_secret_key(self):
         return self.privkey
 
     def import_secret_key(self, privkey_bytes):
+        self.kem = oqs.KeyEncapsulation(self.algo)
+        self.kem.import_secret_key(privkey_bytes)
         self.privkey = privkey_bytes
 
     def encap_secret(self, pubkey_bytes):
-        # Simulate KEM: In production, use real encapsulation
-        shared_secret = os.urandom(32)
-        ciphertext = os.urandom(64)
+        ciphertext, shared_secret = self.kem.encap_secret(pubkey_bytes)
         return ciphertext, shared_secret
 
     def decap_secret(self, ciphertext):
-        # Simulate KEM: In production, use real decapsulation
-        return os.urandom(32)  # Must match sender's shared_secret
+        if self.privkey is None:
+            raise ValueError("Private key not set.")
+        shared_secret = self.kem.decap_secret(ciphertext)
+        return shared_secret
 
-# --- DarkelfMessenger (USE oqs for real ML-KEM-768 KEM) ---
 # --- DarkelfMessenger ---
 class DarkelfMessenger:
     def __init__(self, kem_algo="ML-KEM-768"):
