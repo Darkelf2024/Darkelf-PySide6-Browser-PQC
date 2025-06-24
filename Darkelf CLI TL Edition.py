@@ -1,6 +1,8 @@
 import os
 import sys
 import time
+import argparse
+import logging
 import mmap
 import ctypes
 import random
@@ -26,6 +28,10 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import requests
 
+# --- Logging setup ---
+def setup_logging():
+    logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+    
 # --- Tor integration via Stem ---
 import stem.process
 from stem.control import Controller
@@ -494,6 +500,35 @@ class TorManagerCLI:
             print(f"Tor is not running: {e}")
             return False
 
+    def test_tor_socks_pqc(self):
+        """
+        Test a PQC-protected connection routed through Tor's SOCKS5 proxy with jitter and padding.
+        """
+        try:
+            import socks  # Ensure PySocks is available
+            import time, random
+
+            # Create a SOCKS5 proxy socket through Tor
+            test_sock = socks.socksocket()
+            test_sock.set_proxy(socks.SOCKS5, "127.0.0.1", self.socks_port)
+            test_sock.connect(("127.0.0.1", 9052))
+
+            # Apply artificial jitter (random delay before sending)
+            jitter_delay = random.uniform(0.5, 2.0)  # 0.5 to 2 seconds
+            time.sleep(jitter_delay)
+
+            # Example peer public key; replace with a real one in practice
+            peer_pub_key_b64 = KyberManager().get_public_key()
+            protector = NetworkProtector(test_sock, peer_pub_key_b64)
+
+            # Message padding handled inside send_protected if implemented
+            protector.send_protected(b"[Darkelf] Tor SOCKS test with PQC + jitter + padding")
+            test_sock.close()
+
+        except Exception as e:
+            print(f"[Darkelf] Tor SOCKS PQC test failed: {e}")
+
+
     def stop_tor(self):
         if self.tor_process:
             self.tor_process.terminate()
@@ -503,7 +538,46 @@ class TorManagerCLI:
     def close(self):
         self.stop_tor()
 
+def duckduckgo_search(query):
 
+    # Add jitter to mimic human-like behavior
+    time.sleep(random.uniform(2, 5))
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0',
+    }
+
+    try:
+        session = requests.Session()
+        session.proxies = {
+            'http': get_tor_proxy(),
+            'https': get_tor_proxy(),
+        }
+        url = DUCKDUCKGO_LITE + f"?q={quote_plus(query)}"
+        response = session.get(url, headers=headers, timeout=15)
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        results = []
+
+        for link in soup.find_all("a", href=True):
+            href = link.get("href")
+            text = link.get_text(strip=True)
+            if href.startswith(("http://", "https://")) and text:
+                results.append((text, href))
+
+        if not results:
+            debug_path = f"/tmp/ddg_debug_{query.replace(' ', '_')}.html"
+            with open(debug_path, "w", encoding="utf-8") as f:
+                f.write(response.text)
+            print(f"[Darkelf] Parsing failed for '{query}'. Saved raw HTML to {debug_path}")
+
+        return results
+
+    except Exception as e:
+        print(f"[Darkelf] DuckDuckGo search error for '{query}': {e}")
+        return []
+        
 def get_tor_proxy():
     return f"socks5h://127.0.0.1:9052"
 
@@ -553,20 +627,57 @@ def get_fernet_key():
     with open("logkey.bin", "rb") as f:
         return f.read()
 
-class DarkelfMessenger:
-    def __init__(self):
-        self.kem_algo = "ML-KEM-768"
+#!/usr/bin/env python3
 
-    def generate_keys(self):
+# Placeholder PQ KEM implementation – replace with a real PQC KEM!
+class KeyEncapsulation:
+    def __init__(self, algo):
+        self.algo = algo
+        self.privkey = None
+        self.pubkey = None
+
+    def generate_keypair(self):
+        # In production, use a real PQC KEM (e.g. from Open Quantum Safe)
+        self.privkey = os.urandom(64)
+        self.pubkey = os.urandom(64)
+        return self.pubkey
+
+    def export_secret_key(self):
+        return self.privkey
+
+    def import_secret_key(self, privkey_bytes):
+        self.privkey = privkey_bytes
+
+    def encap_secret(self, pubkey_bytes):
+        # Simulate KEM: In production, use real encapsulation
+        shared_secret = os.urandom(32)
+        ciphertext = os.urandom(64)
+        return ciphertext, shared_secret
+
+    def decap_secret(self, ciphertext):
+        # Simulate KEM: In production, use real decapsulation
+        return os.urandom(32)  # Must match sender's shared_secret
+
+# --- DarkelfMessenger (USE oqs for real ML-KEM-768 KEM) ---
+# --- DarkelfMessenger ---
+class DarkelfMessenger:
+    def __init__(self, kem_algo="ML-KEM-768"):
+        self.kem_algo = kem_algo
+    def generate_keys(self, pubkey_path="my_pubkey.bin", privkey_path="my_privkey.bin"):
         kem = KeyEncapsulation(self.kem_algo)
         pub = kem.generate_keypair()
-        with open("my_pubkey.bin", "wb") as f:
+        with open(pubkey_path, "wb") as f:
             f.write(pub)
-        with open("my_privkey.bin", "wb") as f:
+        with open(privkey_path, "wb") as f:
             f.write(kem.export_secret_key())
-        print("🔐 Keys created")
-
+        logging.info("🔐 Keys created: %s, %s", pubkey_path, privkey_path)
     def send_message(self, recipient_pubkey_path, message_text, output_path="msg.dat"):
+        if not os.path.exists(recipient_pubkey_path):
+            logging.error("Public key file not found: %s", recipient_pubkey_path)
+            return 1
+        if not message_text.strip():
+            logging.error("Message cannot be empty.")
+            return 1
         kem = KeyEncapsulation(self.kem_algo)
         with open(recipient_pubkey_path, "rb") as f:
             pubkey = f.read()
@@ -574,20 +685,35 @@ class DarkelfMessenger:
         key = base64.urlsafe_b64encode(shared_secret[:32])
         token = Fernet(key).encrypt(message_text.encode())
         with open(output_path, "wb") as f:
-            f.write(ciphertext + b'||' + token)
-        print("📤 Message encrypted")
-
+            f.write(b'v1||' + ciphertext + b'||' + token)
+        logging.info("📤 Message encrypted and saved to: %s", output_path)
+        return 0
     def receive_message(self, privkey_path="my_privkey.bin", msg_path="msg.dat"):
+        if not os.path.exists(privkey_path):
+            logging.error("Private key file not found: %s", privkey_path)
+            return 1
+        if not os.path.exists(msg_path):
+            logging.error("Message file not found: %s", msg_path)
+            return 1
         kem = KeyEncapsulation(self.kem_algo)
         with open(privkey_path, "rb") as f:
             kem.import_secret_key(f.read())
         with open(msg_path, "rb") as f:
-            ciphertext, token = f.read().split(b'||')
-        shared_secret = kem.decap_secret(ciphertext)
-        key = base64.urlsafe_b64encode(shared_secret[:32])
-        message = Fernet(key).decrypt(token)
-        print("📥 Message decrypted:", message.decode())
-
+            content = f.read()
+        if not content.startswith(b'v1||'):
+            logging.error("Message format invalid or corrupted.")
+            return 1
+        try:
+            _, ciphertext, token = content.split(b'||', 2)
+            shared_secret = kem.decap_secret(ciphertext)
+            key = base64.urlsafe_b64encode(shared_secret[:32])
+            message = Fernet(key).decrypt(token)
+            print("📥 Message decrypted:", message.decode())
+            return 0
+        except Exception as e:
+            logging.error("Failed to decrypt message: %s", e)
+            return 1
+            
 def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=False, method="GET", data=None):
     proxies = {
         "http": get_tor_proxy(),
@@ -824,7 +950,33 @@ def print_help():
         "  exit                   — Exit browser\n"
     )
 
-def main():
+import sys
+
+def cli_main():
+    setup_logging()
+    parser = argparse.ArgumentParser(description="DarkelfMessenger: PQC CLI Messenger")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    gen_parser = subparsers.add_parser("generate-keys", help="Generate a PQ keypair.")
+    gen_parser.add_argument("--pub", default="my_pubkey.bin", help="Path for public key output.")
+    gen_parser.add_argument("--priv", default="my_privkey.bin", help="Path for private key output.")
+    send_parser = subparsers.add_parser("send", help="Send an encrypted message.")
+    send_parser.add_argument("--pub", required=True, help="Recipient's public key path.")
+    send_parser.add_argument("--msg", required=True, help="Message text to send.")
+    send_parser.add_argument("--out", default="msg.dat", help="Output file for encrypted message.")
+    recv_parser = subparsers.add_parser("receive", help="Receive/decrypt a message.")
+    recv_parser.add_argument("--priv", default="my_privkey.bin", help="Path to your private key.")
+    recv_parser.add_argument("--msgfile", default="msg.dat", help="Encrypted message file.")
+    args = parser.parse_args()
+    messenger = DarkelfMessenger()
+    if args.command == "generate-keys":
+        messenger.generate_keys(pubkey_path=args.pub, privkey_path=args.priv)
+    elif args.command == "send":
+        messenger.send_message(args.pub, args.msg, args.out)
+    elif args.command == "receive":
+        messenger.receive_message(args.priv, args.msgfile)
+
+# --- REPL Entrypoint ---
+def repl_main():
     intrusion_check()
     mem_monitor = MemoryMonitor()
     mem_monitor.start()
@@ -833,10 +985,8 @@ def main():
     tor_manager = TorManagerCLI()
     tor_manager.init_tor()
     messenger = DarkelfMessenger()
-
     print("🛡️  Darkelf CLI Browser - Stealth Mode - Auto Tor rotation, decoy traffic, onion discovery")
     print_help()
-
     extra_stealth_options = {
         "random_order": True,
         "add_noise_headers": True,
@@ -846,10 +996,8 @@ def main():
         "delay_range": (0.1, 1.2)
     }
     stealth_on = True
-
     threading.Thread(target=tor_auto_renew_thread, daemon=True).start()
     threading.Thread(target=decoy_traffic_thread, args=(extra_stealth_options,), daemon=True).start()
-
     while True:
         try:
             cmd = input("darkelf> ").strip()
@@ -907,9 +1055,12 @@ def main():
             print("\n⛔ Ctrl+C - exit requested.")
             phishing_detector.flush_logs_on_exit()
             break
-
     threading.Thread(target=tor_auto_renew_thread, daemon=True).start()
     threading.Thread(target=decoy_traffic_thread, args=(extra_stealth_options,), daemon=True).start()
 
 if __name__ == "__main__":
-    main()
+    cli_commands = {"generate-keys", "send", "receive"}
+    if len(sys.argv) > 1 and sys.argv[1] in cli_commands:
+        cli_main()
+    else:
+        repl_main()
