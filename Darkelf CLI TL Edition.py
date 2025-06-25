@@ -960,6 +960,16 @@ def parse_ddg_lite_results(soup):
             results.append((label, href))
 
     return results if results else "no_results"
+    
+def check_my_ip():
+    try:
+        html, _ = fetch_with_requests("http://check.torproject.org", debug=False)
+        if "Congratulations. This browser is configured to use Tor." in html:
+            print("✅ You're using Tor correctly. Traffic is routed via Tor.")
+        else:
+            print("❌ Warning: Tor routing not detected by check.torproject.org.")
+    except Exception as e:
+        print(f"⚠️ Failed to verify Tor status: {e}")
 
 def fetch_and_display(url, session=None, extra_stealth_options=None, debug=True):
     html, headers = fetch_with_requests(
@@ -1138,6 +1148,7 @@ def print_help():
         "  tool <name>            — Install and launch terminal tool\n"
         "  tools                  — List available terminal tools\n"
         "  wipe                   — Self-destruct and wipe sensitive files\n"
+        "  checkip                — Verify you're routed through Tor\n"
         "  help                   — Show this help\n"
         "  exit                   — Exit browser\n"
     )
@@ -1195,6 +1206,8 @@ def repl_main():
             cmd = input("darkelf> ").strip()
             if not cmd:
                 continue
+            elif cmd == "checkip":
+                check_my_ip()
             elif cmd == "help":
                 print_help()
             elif cmd == "tools":
@@ -1256,6 +1269,3 @@ if __name__ == "__main__":
         cli_main()
     else:
         repl_main()
-
-
-
