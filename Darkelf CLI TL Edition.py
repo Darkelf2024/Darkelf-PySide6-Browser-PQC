@@ -1,3 +1,57 @@
+# Darkelf CLI Browser v3.0 – Secure, Privacy-Focused Command-Line Web Browser
+# Copyright (C) 2025 Dr. Kevin Moore
+#
+# SPDX-License-Identifier: LGPL-3.0-or-later
+#
+# This program is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Lesser General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+#
+# EXPORT COMPLIANCE NOTICE:
+# This software contains publicly available encryption source code and is
+# released under License Exception TSU in accordance with 15 CFR §740.13(e) of the
+# U.S. Export Administration Regulations (EAR).
+#
+# A public notification of source code release has been submitted to the
+# U.S. Bureau of Industry and Security (BIS) and the National Security Agency (NSA).
+#
+# The software includes implementations of standard cryptographic algorithms
+# (e.g., AES, RSA, ChaCha20, TLS 1.3, X25519) for research and general-purpose use.
+#
+# This is source code only. No compiled binaries are included in this distribution.
+# Redistribution, modification, or use must comply with all applicable U.S. export
+# control laws and regulations.
+#
+# PROHIBITED DESTINATIONS:
+# This software may not be exported or transferred, directly or indirectly, to:
+# - Countries or territories under comprehensive U.S. embargo (OFAC or BIS lists),
+# - Entities or individuals listed on the U.S. Denied Persons, Entity, or SDN Lists,
+# - Parties on the BIS Country Group E:1 or E:2 lists.
+#
+# END-USE RESTRICTIONS:
+# This software may not be used in the development or production of weapons of mass
+# destruction, including nuclear, chemical, biological weapons, or missile systems
+# as defined in EAR Part 744.
+#
+# By downloading, using, or distributing this software, you agree to comply with
+# all applicable export control laws.
+#
+# This software is published under the LGPL v3.0 license and authored by
+# Dr. Kevin Moore, 2025.
+#
+# NOTE: This is the CLI (Command-Line Interface) edition of Darkelf.
+# It is entirely terminal-based and does not use PyQt5, PySide6, or any GUI frameworks.
+
+
 import os
 import sys
 import time
