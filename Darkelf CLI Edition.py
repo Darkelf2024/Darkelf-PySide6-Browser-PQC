@@ -1,6 +1,62 @@
+# Darkelf CLI Browser v3.0 – Secure, Privacy-Focused Command-Line Web Browser
+# Copyright (C) 2025 Dr. Kevin Moore
+#
+# SPDX-License-Identifier: LGPL-3.0-or-later
+#
+# This program is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Lesser General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+#
+# EXPORT COMPLIANCE NOTICE:
+# This software contains publicly available encryption source code and is
+# released under License Exception TSU in accordance with 15 CFR §740.13(e) of the
+# U.S. Export Administration Regulations (EAR).
+#
+# A public notification of source code release has been submitted to the
+# U.S. Bureau of Industry and Security (BIS) and the National Security Agency (NSA).
+#
+# The software includes implementations of standard cryptographic algorithms
+# (e.g., AES, RSA, ChaCha20, TLS 1.3, X25519) for research and general-purpose use.
+#
+# This is source code only. No compiled binaries are included in this distribution.
+# Redistribution, modification, or use must comply with all applicable U.S. export
+# control laws and regulations.
+#
+# PROHIBITED DESTINATIONS:
+# This software may not be exported or transferred, directly or indirectly, to:
+# - Countries or territories under comprehensive U.S. embargo (OFAC or BIS lists),
+# - Entities or individuals listed on the U.S. Denied Persons, Entity, or SDN Lists,
+# - Parties on the BIS Country Group E:1 or E:2 lists.
+#
+# END-USE RESTRICTIONS:
+# This software may not be used in the development or production of weapons of mass
+# destruction, including nuclear, chemical, biological weapons, or missile systems
+# as defined in EAR Part 744.
+#
+# By downloading, using, or distributing this software, you agree to comply with
+# all applicable export control laws.
+#
+# This software is published under the LGPL v3.0 license and authored by
+# Dr. Kevin Moore, 2025.
+#
+# NOTE: This is the CLI (Command-Line Interface) edition of Darkelf.
+# It is entirely terminal-based and does not use PyQt5, PySide6, or any GUI frameworks.
+
+
 import os
 import sys
 import time
+import argparse
+import logging
 import mmap
 import ctypes
 import random
@@ -12,6 +68,9 @@ import socket
 import json
 import secrets
 import platform
+import shlex
+import subprocess
+import oqs
 import re
 from datetime import datetime
 import psutil
@@ -24,6 +83,10 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import requests
 
+# --- Logging setup ---
+def setup_logging():
+    logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+    
 # --- Tor integration via Stem ---
 import stem.process
 from stem.control import Controller
@@ -382,8 +445,6 @@ class NetworkProtector:
 
         return base64.b64encode(json.dumps(packet).encode())
 
-# --- Existing CLI code below (unchanged, but now can use above tools) ---
-
 class TorManagerCLI:
     def __init__(self):
         self.tor_process = None
@@ -469,19 +530,33 @@ class TorManagerCLI:
                     config=tor_config,
                     init_msg_handler=lambda line: print("[tor fallback]", line)
                 )
-
-            # Authenticate controller
-            self.controller = Controller.from_port(port=self.control_port)
+            
+            # Wait for the control_auth_cookie to appear and be readable
             cookie_path = os.path.join(tor_config['DataDirectory'], 'control_auth_cookie')
+            self.wait_for_cookie(cookie_path)
+
+            # Connect controller and authenticate using the cookie
+            self.controller = Controller.from_port(port=self.control_port)
             with open(cookie_path, 'rb') as f:
                 cookie = f.read()
-            self.controller.authenticate(password=None, cookie=cookie)
+            self.controller.authenticate(cookie)
             print("[Darkelf] Tor authenticated via cookie.")
-
+            
         except OSError as e:
             print(f"Failed to start Tor: {e}")
         except Exception as e:
             print(f"Unexpected error: {e}")
+
+    def wait_for_cookie(self, cookie_path, timeout=10):
+        start = time.time()
+        while True:
+            try:
+                with open(cookie_path, 'rb'):
+                    return
+            except Exception:
+                if time.time() - start > timeout:
+                    raise TimeoutError("Timed out waiting for Tor control_auth_cookie to appear.")
+                time.sleep(0.2)
 
     def is_tor_running(self):
         try:
@@ -492,6 +567,41 @@ class TorManagerCLI:
             print(f"Tor is not running: {e}")
             return False
 
+    def is_tor_running(self):
+        try:
+            with Controller.from_port(port=self.control_port) as controller:
+                controller.authenticate()
+                return True
+        except Exception as e:
+            print(f"Tor is not running: {e}")
+            return False
+
+    def test_tor_socks_pqc(self):
+        """
+        Test a PQC-protected connection routed through Tor's SOCKS5 proxy with jitter and padding.
+        """
+        try:
+            # Create a SOCKS5 proxy socket through Tor
+            test_sock = socks.socksocket()
+            test_sock.set_proxy(socks.SOCKS5, "127.0.0.1", self.socks_port)
+            test_sock.connect(("127.0.0.1", 9052))
+
+            # Apply artificial jitter (random delay before sending)
+            jitter_delay = random.uniform(0.5, 2.0)  # 0.5 to 2 seconds
+            time.sleep(jitter_delay)
+
+            # Example peer public key; replace with a real one in practice
+            peer_pub_key_b64 = KyberManager().get_public_key()
+            protector = NetworkProtector(test_sock, peer_pub_key_b64)
+
+            # Message padding handled inside send_protected if implemented
+            protector.send_protected(b"[Darkelf] Tor SOCKS test with PQC + jitter + padding")
+            test_sock.close()
+
+        except Exception as e:
+            print(f"[Darkelf] Tor SOCKS PQC test failed: {e}")
+
+
     def stop_tor(self):
         if self.tor_process:
             self.tor_process.terminate()
@@ -501,7 +611,46 @@ class TorManagerCLI:
     def close(self):
         self.stop_tor()
 
+def duckduckgo_search(query):
 
+    # Add jitter to mimic human-like behavior
+    time.sleep(random.uniform(2, 5))
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0',
+    }
+
+    try:
+        session = requests.Session()
+        session.proxies = {
+            'http': get_tor_proxy(),
+            'https': get_tor_proxy(),
+        }
+        url = DUCKDUCKGO_LITE + f"?q={quote_plus(query)}"
+        response = session.get(url, headers=headers, timeout=15)
+
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        results = []
+
+        for link in soup.find_all("a", href=True):
+            href = link.get("href")
+            text = link.get_text(strip=True)
+            if href.startswith(("http://", "https://")) and text:
+                results.append((text, href))
+
+        if not results:
+            debug_path = f"/tmp/ddg_debug_{query.replace(' ', '_')}.html"
+            with open(debug_path, "w", encoding="utf-8") as f:
+                f.write(response.text)
+            print(f"[Darkelf] Parsing failed for '{query}'. Saved raw HTML to {debug_path}")
+
+        return results
+
+    except Exception as e:
+        print(f"[Darkelf] DuckDuckGo search error for '{query}': {e}")
+        return []
+        
 def get_tor_proxy():
     return f"socks5h://127.0.0.1:9052"
 
@@ -542,29 +691,82 @@ def encrypt_log(message, key):
     f = Fernet(key)
     return f.encrypt(message.encode())
 
-def get_fernet_key():
-    if not os.path.exists("logkey.bin"):
+def get_fernet_key(path="logkey.bin"):
+    from cryptography.fernet import Fernet
+    import base64, os
+
+    def is_valid_fernet_key(k):
+        try:
+            return len(base64.urlsafe_b64decode(k)) == 32
+        except Exception:
+            return False
+
+    if not os.path.exists(path):
         key = Fernet.generate_key()
-        with open("logkey.bin", "wb") as f:
+        with open(path, "wb") as f:
             f.write(key)
         return key
-    with open("logkey.bin", "rb") as f:
-        return f.read()
 
+    with open(path, "rb") as f:
+        key = f.read().strip()
+
+    if not is_valid_fernet_key(key):
+        print("⚠️ Invalid key file detected. Regenerating secure Fernet key.")
+        key = Fernet.generate_key()
+        with open(path, "wb") as f:
+            f.write(key)
+
+    return key
+
+class KeyEncapsulation:
+    def __init__(self, algo="ML-KEM-768"):
+        self.algo = algo
+        self.kem = oqs.KeyEncapsulation(self.algo)
+        self.privkey = None
+        self.pubkey = None
+
+    def generate_keypair(self):
+        self.pubkey = self.kem.generate_keypair()
+        self.privkey = self.kem.export_secret_key()
+        return self.pubkey
+
+    def export_secret_key(self):
+        return self.privkey
+
+    def import_secret_key(self, privkey_bytes):
+        self.kem = oqs.KeyEncapsulation(self.algo)
+        self.kem.import_secret_key(privkey_bytes)
+        self.privkey = privkey_bytes
+
+    def encap_secret(self, pubkey_bytes):
+        ciphertext, shared_secret = self.kem.encap_secret(pubkey_bytes)
+        return ciphertext, shared_secret
+
+    def decap_secret(self, ciphertext):
+        if self.privkey is None:
+            raise ValueError("Private key not set.")
+        shared_secret = self.kem.decap_secret(ciphertext)
+        return shared_secret
+
+# --- DarkelfMessenger ---
 class DarkelfMessenger:
-    def __init__(self):
-        self.kem_algo = "ML-KEM-768"
-
-    def generate_keys(self):
+    def __init__(self, kem_algo="ML-KEM-768"):
+        self.kem_algo = kem_algo
+    def generate_keys(self, pubkey_path="my_pubkey.bin", privkey_path="my_privkey.bin"):
         kem = KeyEncapsulation(self.kem_algo)
         pub = kem.generate_keypair()
-        with open("my_pubkey.bin", "wb") as f:
+        with open(pubkey_path, "wb") as f:
             f.write(pub)
-        with open("my_privkey.bin", "wb") as f:
+        with open(privkey_path, "wb") as f:
             f.write(kem.export_secret_key())
-        print("🔐 Keys created")
-
+        logging.info("🔐 Keys created: %s, %s", pubkey_path, privkey_path)
     def send_message(self, recipient_pubkey_path, message_text, output_path="msg.dat"):
+        if not os.path.exists(recipient_pubkey_path):
+            logging.error("Public key file not found: %s", recipient_pubkey_path)
+            return 1
+        if not message_text.strip():
+            logging.error("Message cannot be empty.")
+            return 1
         kem = KeyEncapsulation(self.kem_algo)
         with open(recipient_pubkey_path, "rb") as f:
             pubkey = f.read()
@@ -572,21 +774,36 @@ class DarkelfMessenger:
         key = base64.urlsafe_b64encode(shared_secret[:32])
         token = Fernet(key).encrypt(message_text.encode())
         with open(output_path, "wb") as f:
-            f.write(ciphertext + b'||' + token)
-        print("📤 Message encrypted")
-
+            f.write(b'v1||' + ciphertext + b'||' + token)
+        logging.info("📤 Message encrypted and saved to: %s", output_path)
+        return 0
     def receive_message(self, privkey_path="my_privkey.bin", msg_path="msg.dat"):
+        if not os.path.exists(privkey_path):
+            logging.error("Private key file not found: %s", privkey_path)
+            return 1
+        if not os.path.exists(msg_path):
+            logging.error("Message file not found: %s", msg_path)
+            return 1
         kem = KeyEncapsulation(self.kem_algo)
         with open(privkey_path, "rb") as f:
             kem.import_secret_key(f.read())
         with open(msg_path, "rb") as f:
-            ciphertext, token = f.read().split(b'||')
-        shared_secret = kem.decap_secret(ciphertext)
-        key = base64.urlsafe_b64encode(shared_secret[:32])
-        message = Fernet(key).decrypt(token)
-        print("📥 Message decrypted:", message.decode())
-
-def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=False, method="GET", data=None):
+            content = f.read()
+        if not content.startswith(b'v1||'):
+            logging.error("Message format invalid or corrupted.")
+            return 1
+        try:
+            _, ciphertext, token = content.split(b'||', 2)
+            shared_secret = kem.decap_secret(ciphertext)
+            key = base64.urlsafe_b64encode(shared_secret[:32])
+            message = Fernet(key).decrypt(token)
+            print("📥 Message decrypted:", message.decode())
+            return 0
+        except Exception as e:
+            logging.error("Failed to decrypt message: %s", e)
+            return 1
+            
+def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=True, method="GET", data=None):
     proxies = {
         "http": get_tor_proxy(),
         "https": get_tor_proxy()
@@ -617,31 +834,29 @@ def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=Fal
 
 def parse_ddg_lite_results(soup):
     results = []
-    for td in soup.find_all("td"):
-        a = td.find("a", href=True)
-        if a and a['href'].startswith("/l/?"):
-            query = urlparse(a['href']).query
-            qdict = parse_qs(query)
-            uddg = unquote(qdict.get('uddg', [''])[0])
-            label = a.get_text(strip=True)
-            if label and uddg:
-                results.append((label, uddg))
-    if not results:
-        for a in soup.find_all("a", href=True):
-            if a['href'].startswith("/l/?"):
-                query = urlparse(a['href']).query
-                qdict = parse_qs(query)
-                uddg = unquote(qdict.get('uddg', [''])[0])
-                label = a.get_text(strip=True)
-                if label and uddg:
-                    results.append((label, uddg))
+
+    # Try legacy DuckDuckGo format: /l/?uddg=
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        label = a.get_text(strip=True)
+        if href.startswith("/l/?uddg="):
+            parsed = urlparse(href)
+            query = parse_qs(parsed.query)
+            real_url = unquote(query.get("uddg", [""])[0])
+            if real_url and label:
+                results.append((label, real_url))
+        elif href.startswith("http") and label:
+            # Fallback for newer or raw results
+            results.append((label, href))
+
     if not results:
         nores = soup.find(string=lambda text: text and "No results found" in text)
         if nores:
             return "no_results"
+
     return results
 
-def fetch_and_display(url, session=None, extra_stealth_options=None, debug=False):
+def fetch_and_display(url, session=None, extra_stealth_options=None, debug=True):
     html, headers = fetch_with_requests(
         url,
         session=session,
@@ -739,10 +954,10 @@ def decoy_traffic_thread(extra_stealth_options=None):
             pass
 
 def onion_discovery(keywords, extra_stealth_options=None):
-    ahmia = "https://msydqstlz2kzerdg.onion/search/?q=" + quote_plus(keywords)
+    ahmia = "http://juhanurmihxlp77nkq76byazcldy2hlmovfu2epvl5ankdibsot4csyd.onion/search/?q=" + quote_plus(keywords)
     print(f"🌐 Discovering .onion services for: {keywords}")
     try:
-        html, _ = fetch_with_requests(ahmia, extra_stealth_options=extra_stealth_options)
+        html, _ = fetch_with_requests(ahmia, extra_stealth_options=extra_stealth_options, debug=False)
         soup = BeautifulSoup(html, "html.parser")
         seen = set()
         for a in soup.find_all("a", href=True):
@@ -772,12 +987,36 @@ def print_help():
         "  exit                   — Exit browser\n"
     )
 
-def main():
+import sys
+
+def cli_main():
+    setup_logging()
+    parser = argparse.ArgumentParser(description="DarkelfMessenger: PQC CLI Messenger")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    gen_parser = subparsers.add_parser("generate-keys", help="Generate a PQ keypair.")
+    gen_parser.add_argument("--pub", default="my_pubkey.bin", help="Path for public key output.")
+    gen_parser.add_argument("--priv", default="my_privkey.bin", help="Path for private key output.")
+    send_parser = subparsers.add_parser("send", help="Send an encrypted message.")
+    send_parser.add_argument("--pub", required=True, help="Recipient's public key path.")
+    send_parser.add_argument("--msg", required=True, help="Message text to send.")
+    send_parser.add_argument("--out", default="msg.dat", help="Output file for encrypted message.")
+    recv_parser = subparsers.add_parser("receive", help="Receive/decrypt a message.")
+    recv_parser.add_argument("--priv", default="my_privkey.bin", help="Path to your private key.")
+    recv_parser.add_argument("--msgfile", default="msg.dat", help="Encrypted message file.")
+    args = parser.parse_args()
+    messenger = DarkelfMessenger()
+    if args.command == "generate-keys":
+        messenger.generate_keys(pubkey_path=args.pub, privkey_path=args.priv)
+    elif args.command == "send":
+        messenger.send_message(args.pub, args.msg, args.out)
+    elif args.command == "receive":
+        messenger.receive_message(args.priv, args.msgfile)
+
+# --- REPL Entrypoint ---
+def repl_main():
     intrusion_check()
-    # Start memory monitor for anti-forensics
     mem_monitor = MemoryMonitor()
     mem_monitor.start()
-    # PQ anti-forensics logger
     pq_logger = StealthCovertOpsPQ(stealth_mode=True)
     phishing_detector = PhishingDetectorZeroTrace(pq_logger=pq_logger)
     tor_manager = TorManagerCLI()
@@ -790,14 +1029,12 @@ def main():
         "add_noise_headers": True,
         "minimal_headers": False,
         "spoof_platform": True,
-        "session_isolation": False,
-        "delay_range": (0.1, 1.2)
+        "session_isolation": True,
+        "delay_range": (1.5, 3.0)
     }
     stealth_on = True
-
     threading.Thread(target=tor_auto_renew_thread, daemon=True).start()
     threading.Thread(target=decoy_traffic_thread, args=(extra_stealth_options,), daemon=True).start()
-
     while True:
         try:
             cmd = input("darkelf> ").strip()
@@ -805,38 +1042,30 @@ def main():
                 continue
             elif cmd == "help":
                 print_help()
+            elif cmd == "tools":
+                print_tools_help()
+            elif cmd.startswith("tool "):
+                tool_name = cmd.split(" ", 1)[1]
+                open_tool(tool_name)
             elif cmd == "stealth":
                 stealth_on = not stealth_on
                 print("🫥 Extra stealth options are now", "ENABLED" if stealth_on else "DISABLED")
             elif cmd.startswith("search "):
                 q = cmd.split(" ", 1)[1]
                 url = f"{DUCKDUCKGO_LITE}?q={quote_plus(q)}"
-                # Phishing detection
                 suspicious, reason = phishing_detector.is_suspicious_url(url)
                 if suspicious:
                     print(f"⚠️ [PHISHING WARNING] {reason}")
-                fetch_and_display(
-                    url,
-                    extra_stealth_options=extra_stealth_options if stealth_on else {},
-                    debug=False
-                )
+                fetch_and_display(url, extra_stealth_options=extra_stealth_options if stealth_on else {}, debug=False)
             elif cmd.startswith("debug "):
                 q = cmd.split(" ", 1)[1]
                 url = f"{DUCKDUCKGO_LITE}?q={quote_plus(q)}"
                 suspicious, reason = phishing_detector.is_suspicious_url(url)
                 if suspicious:
                     print(f"⚠️ [PHISHING WARNING] {reason}")
-                fetch_and_display(
-                    url,
-                    extra_stealth_options=extra_stealth_options if stealth_on else {},
-                    debug=True
-                )
+                fetch_and_display(url, extra_stealth_options=extra_stealth_options if stealth_on else {}, debug=True)
             elif cmd == "duck":
-                fetch_and_display(
-                    DUCKDUCKGO_LITE,
-                    extra_stealth_options=extra_stealth_options if stealth_on else {},
-                    debug=False
-                )
+                fetch_and_display(DUCKDUCKGO_LITE, extra_stealth_options=extra_stealth_options if stealth_on else {}, debug=False)
             elif cmd == "genkeys":
                 messenger.generate_keys()
             elif cmd == "sendmsg":
@@ -858,11 +1087,17 @@ def main():
                 phishing_detector.flush_logs_on_exit()
                 break
             else:
-                print("❓ Unknown command")
+                print("❓ Unknown command. Type `help` for options.")
         except KeyboardInterrupt:
             print("\n⛔ Ctrl+C - exit requested.")
             phishing_detector.flush_logs_on_exit()
             break
+    threading.Thread(target=tor_auto_renew_thread, daemon=True).start()
+    threading.Thread(target=decoy_traffic_thread, args=(extra_stealth_options,), daemon=True).start()
 
 if __name__ == "__main__":
-    main()
+    cli_commands = {"generate-keys", "send", "receive"}
+    if len(sys.argv) > 1 and sys.argv[1] in cli_commands:
+        cli_main()
+    else:
+        repl_main()
