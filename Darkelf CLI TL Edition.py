@@ -196,10 +196,10 @@ class DarkelfKernelMonitor(threading.Thread):
 
     def secure_purge_darkelf_vault(self):
         vault_paths = [
-            os.path.expanduser("~/Darkelf/Darkelf Vault TL Edition.py"),
-            os.path.expanduser("~/Desktop/Darkelf Vault TL Edition.py"),
-            "/usr/local/bin/Darkelf Vault Browser.py",
-            "/opt/darkelf/Darkelf Vault Browser.py"
+            os.path.expanduser("~/Darkelf/Darkelf CLI TL Edition.py"),
+            os.path.expanduser("~/Desktop/Darkelf CLI TL Edition.py"),
+            "/usr/local/bin/Darkelf CLI Browser.py",
+            "/opt/darkelf/Darkelf CLI Browser.py"
         ]
         for path in vault_paths:
             if os.path.exists(path):
