@@ -51,7 +51,6 @@
 # NOTE: This is the CLI (Command-Line Interface) edition of Darkelf.
 # It is entirely terminal-based and does not use PyQt5, PySide6, or any GUI frameworks.
 
-
 import os
 import sys
 import time
@@ -197,10 +196,10 @@ class DarkelfKernelMonitor(threading.Thread):
 
     def secure_purge_darkelf_vault(self):
         vault_paths = [
-            os.path.expanduser("~/Darkelf/Darkelf CLI TL Edition.py"),
-            os.path.expanduser("~/Desktop/Darkelf CLI TL Edition.py"),
-            "/usr/local/bin/Darkelf CLI Browser.py",
-            "/opt/darkelf/Darkelf CLI Browser.py"
+            os.path.expanduser("~/Darkelf/Darkelf Vault TL Edition.py"),
+            os.path.expanduser("~/Desktop/Darkelf Vault TL Edition.py"),
+            "/usr/local/bin/Darkelf Vault Browser.py",
+            "/opt/darkelf/Darkelf Vault Browser.py"
         ]
         for path in vault_paths:
             if os.path.exists(path):
@@ -1082,7 +1081,7 @@ def open_tool(tool):
     """
     allowed_tools = [
         "sherlock", "shodan", "recon-ng", "theharvester", "nmap", "yt-dlp", "maltego", "masscan",
-        "amass", "subfinder", "exiftool", "mat2", "neomutt", "thunderbird"
+        "amass", "subfinder", "exiftool", "mat2", "neomutt", "thunderbird", "dnstwist", "gitleaks", "httpx", "p0f"
     ]
     tool = tool.lower()
     if tool not in allowed_tools:
@@ -1121,7 +1120,7 @@ def print_tools_help():
         "  tool <name>      — Install and launch terminal tool\n"
         "Available tools:\n"
         "  sherlock, shodan, recon-ng, theharvester, nmap, yt-dlp, maltego, masscan,\n"
-        "  amass, subfinder, exiftool, mat2, neomutt, thunderbird\n"
+        "  amass, subfinder, exiftool, mat2, neomutt, dnstwist, gitleaks, httpx, p0f, thunderbird\n"
     )
 
 def print_help():
