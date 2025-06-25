@@ -69,6 +69,8 @@ import secrets
 import platform
 import shlex
 import subprocess
+import termios
+import tty
 from typing import Optional
 import oqs
 import re
@@ -1146,7 +1148,8 @@ def print_help():
         "  tornew                 — Request new Tor circuit (if supported)\n"
         "  findonions <keywords>  — Discover .onion services by keywords (no bookmarks/history)\n"
         "  tool <name>            — Install and launch terminal tool\n"
-        "  tools                  — List available terminal tools\n"
+        "  tool                   — List available terminal tools\n"
+        "  browser                - Launch Darkelf CLI Browser\n"
         "  wipe                   — Self-destruct and wipe sensitive files\n"
         "  checkip                — Verify you're routed through Tor\n"
         "  help                   — Show this help\n"
@@ -1175,7 +1178,128 @@ def cli_main():
         messenger.send_message(args.pub, args.msg, args.out)
     elif args.command == "receive":
         messenger.receive_message(args.priv, args.msgfile)
-        
+
+def get_key():
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        key = sys.stdin.read(1)
+        if key == '\x1b':
+            key += sys.stdin.read(2)
+        return key
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+class Page:
+    def __init__(self, url):
+        self.url = url
+        self.lines = []
+        self.links = []
+        self.error = None
+        self.fetch()
+
+    def fetch(self):
+        try:
+            html, _ = fetch_with_requests(self.url, debug=False)
+            soup = BeautifulSoup(html, 'html.parser')
+
+            for s in soup(['script', 'style']):
+                s.decompose()
+
+            text = soup.get_text(separator='\n')
+            self.links = [
+                (i + 1, a.get_text(strip=True), a.get('href'))
+                for i, a in enumerate(soup.find_all('a'))
+            ]
+
+            for i, (num, label, _) in enumerate(self.links):
+                label = label or "Unnamed link"
+                text = text.replace(label, f"[{num}] {label}", 1)
+
+            self.lines = [l.strip() for l in text.splitlines() if l.strip()]
+        except Exception as e:
+            self.error = str(e)
+
+class DarkelfCLIBrowser:
+    def __init__(self):
+        self.history = []
+        self.forward_stack = []
+        self.current_page = None
+        self.scroll = 0
+        self.height = 20
+
+    def clear(self):
+        os.system('clear' if os.name == 'posix' else 'cls')
+
+    def render(self):
+        self.clear()
+        if not self.current_page:
+            print("No page loaded.")
+            return
+        print(f"\033[1mDarkelf CLI Browser – {self.current_page.url}\033[0m")
+        print("-" * 60)
+        if self.current_page.error:
+            print(f"[!] Error: {self.current_page.error}")
+            return
+        for i in range(self.scroll, min(self.scroll + self.height, len(self.current_page.lines))):
+            print(self.current_page.lines[i][:80])
+        print("-" * 60)
+        print("[↑/↓]: Scroll  |  [o #]: Open Link  |  u: URL  |  b: Back  |  q: Quit")
+
+    def visit(self, url):
+        if self.current_page:
+            self.history.append(self.current_page.url)
+        self.scroll = 0
+        self.forward_stack.clear()
+        self.current_page = Page(url)
+        self.render()
+
+    def open_link(self, number):
+        try:
+            link = dict((num, href) for num, _, href in self.current_page.links)[number]
+            if link:
+                if not link.startswith("http"):
+                    from urllib.parse import urljoin
+                    link = urljoin(self.current_page.url, link)
+                self.visit(link)
+        except:
+            pass
+
+    def run(self):
+        self.visit("https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite")
+        while True:
+            key = get_key()
+            if key in ('q', 'Q'):
+                break
+            elif key in ('\x1b[A', 'w'):
+                if self.scroll > 0:
+                    self.scroll -= 1
+                    self.render()
+            elif key in ('\x1b[B', 's'):
+                if self.scroll + self.height < len(self.current_page.lines):
+                    self.scroll += 1
+                    self.render()
+            elif key == 'u':
+                print("\nEnter URL: ", end="")
+                url = input().strip()
+                if not url.startswith("http"):
+                    url = "https://" + url
+                self.visit(url)
+            elif key == 'b':
+                if self.history:
+                    url = self.history.pop()
+                    self.forward_stack.append(self.current_page.url)
+                    self.visit(url)
+            elif key == 'o':
+                try:
+                    print("\nLink number to open: ", end="")
+                    num = int(input())
+                    self.open_link(num)
+                except:
+                    pass
+            self.render()
+
 def repl_main():
     os.environ["HISTFILE"] = ""
     try:
@@ -1219,6 +1343,8 @@ def repl_main():
             elif cmd.startswith("tool "):
                 tool_name = cmd.split(" ", 1)[1]
                 open_tool(tool_name)
+            elif cmd == "browser":
+                DarkelfCLIBrowser().run()
             elif cmd == "stealth":
                 stealth_on = not stealth_on
                 print("🫥 Extra stealth options are now", "ENABLED" if stealth_on else "DISABLED")
