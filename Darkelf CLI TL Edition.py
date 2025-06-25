@@ -70,6 +70,7 @@ import secrets
 import platform
 import shlex
 import subprocess
+from typing import Optional
 import oqs
 import re
 from datetime import datetime
@@ -125,6 +126,115 @@ KEY_FILES = [
     "my_pubkey.bin", "my_privkey.bin", "msg.dat",
     "history.log", "log.enc", "logkey.bin"
 ]
+
+class DarkelfKernelMonitor(threading.Thread):
+    """
+    Monitors kernel state and flags forensic-risk activity (e.g., swap use).
+    Instead of force shutdown, it sets a cleanup flag and performs secure wipe on exit.
+    """
+    def __init__(self, check_interval=5, parent_app=None):
+        super().__init__(daemon=True)
+        self.check_interval = check_interval
+        self.parent_app = parent_app
+        self.initial_fingerprint = self.system_fingerprint()
+        self._last_swap_active = None
+        self._last_pager_state = None
+        self._last_fingerprint_hash = hash(str(self.initial_fingerprint))
+        self.cleanup_required = False
+
+    def run(self):
+        self.monitor_active = True
+        print("[DarkelfKernelMonitor] ✅ Kernel monitor active.")
+        while True:
+            time.sleep(self.check_interval)
+            swap_now = self.swap_active()
+            if swap_now != self._last_swap_active:
+                if swap_now:
+                    print("\u274c [DarkelfKernelMonitor] Swap is ACTIVE — marking cleanup required!")
+                    self.kill_dynamic_pager()
+                    self.cleanup_required = True
+                self._last_swap_active = swap_now
+
+            pager_now = self.dynamic_pager_running()
+            if pager_now != self._last_pager_state:
+                if pager_now:
+                    print("\u274c [DarkelfKernelMonitor] dynamic_pager is RUNNING")
+                self._last_pager_state = pager_now
+
+            current_fingerprint = self.system_fingerprint()
+            if hash(str(current_fingerprint)) != self._last_fingerprint_hash:
+                print("\u26a0\ufe0f [DarkelfKernelMonitor] Kernel config changed!")
+                self.cleanup_required = True
+                self._last_fingerprint_hash = hash(str(current_fingerprint))
+
+    def swap_active(self):
+        try:
+            with open("/proc/swaps", "r") as f:
+                return len(f.readlines()) > 1  # Header + at least one active swap
+        except Exception:
+            return False
+
+    def dynamic_pager_running(self):
+        try:
+            output = subprocess.check_output(['ps', 'aux'], stderr=subprocess.DEVNULL).decode().lower()
+            return "dynamic_pager" in output
+        except Exception:
+            return False
+
+    def kill_dynamic_pager(self):
+        try:
+            subprocess.run(["sudo", "launchctl", "bootout", "system", "/System/Library/LaunchDaemons/com.apple.dynamic_pager.plist"], check=True)
+            print("\U0001f512 [DarkelfKernelMonitor] dynamic_pager disabled")
+        except subprocess.CalledProcessError:
+            print("\u26a0\ufe0f [DarkelfKernelMonitor] Failed to disable dynamic_pager")
+
+    def secure_delete_swap(self):
+        try:
+            subprocess.run(["sudo", "rm", "-f", "/private/var/vm/swapfile*"], check=True)
+            print("\U0001f4a8 [DarkelfKernelMonitor] Swap files removed")
+        except Exception as e:
+            print(f"\u26a0\ufe0f [DarkelfKernelMonitor] Failed to remove swapfiles: {e}")
+
+    def secure_purge_darkelf_vault(self):
+        vault_paths = [
+            os.path.expanduser("~/Darkelf/Darkelf Vault TL Edition.py"),
+            os.path.expanduser("~/Desktop/Darkelf Vault TL Edition.py"),
+            "/usr/local/bin/Darkelf Vault Browser.py",
+            "/opt/darkelf/Darkelf Vault Browser.py"
+        ]
+        for path in vault_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, "ba+", buffering=0) as f:
+                        length = f.tell()
+                        f.seek(0)
+                        f.write(secrets.token_bytes(length))
+                    os.remove(path)
+                    print(f"\U0001f4a5 [DarkelfKernelMonitor] Vault destroyed: {path}")
+                except Exception as e:
+                    print(f"\u26a0\ufe0f Failed to delete {path}: {e}")
+
+    def shutdown_darkelf(self):
+        print("\U0001f4a3 [DarkelfKernelMonitor] Shutdown initiated.")
+        if self.cleanup_required:
+            self.secure_delete_swap()
+            self.secure_purge_darkelf_vault()
+        if self.parent_app:
+            self.parent_app.quit()
+        else:
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    def system_fingerprint(self):
+        keys = ["kern.osrevision", "kern.osversion", "kern.bootargs"]
+        results = {}
+        for key in keys:
+            try:
+                val = subprocess.check_output(['sysctl', key], stderr=subprocess.DEVNULL).decode().strip()
+                results[key] = val
+            except Exception:
+                results[key] = "ERROR"
+        return results
+
 
 # --- SecureBuffer: RAM-locked buffer for sensitive data ---
 class SecureBuffer:
@@ -834,27 +944,23 @@ def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=Tru
 
 def parse_ddg_lite_results(soup):
     results = []
-
-    # Try legacy DuckDuckGo format: /l/?uddg=
     for a in soup.find_all("a", href=True):
         href = a["href"]
         label = a.get_text(strip=True)
-        if href.startswith("/l/?uddg="):
+
+        # Handle redirect wrapper
+        if "redirect_url=" in href:
             parsed = urlparse(href)
             query = parse_qs(parsed.query)
-            real_url = unquote(query.get("uddg", [""])[0])
+            real_url = query.get("redirect_url", [None])[0]
             if real_url and label:
                 results.append((label, real_url))
+
+        # Handle direct links
         elif href.startswith("http") and label:
-            # Fallback for newer or raw results
             results.append((label, href))
 
-    if not results:
-        nores = soup.find(string=lambda text: text and "No results found" in text)
-        if nores:
-            return "no_results"
-
-    return results
+    return results if results else "no_results"
 
 def fetch_and_display(url, session=None, extra_stealth_options=None, debug=True):
     html, headers = fetch_with_requests(
@@ -1037,8 +1143,6 @@ def print_help():
         "  exit                   — Exit browser\n"
     )
 
-import sys
-
 def cli_main():
     setup_logging()
     parser = argparse.ArgumentParser(description="DarkelfMessenger: PQC CLI Messenger")
@@ -1065,6 +1169,8 @@ def cli_main():
 # --- REPL Entrypoint ---
 def repl_main():
     intrusion_check()
+    kernel_monitor = DarkelfKernelMonitor()
+    kernel_monitor.start()
     mem_monitor = MemoryMonitor()
     mem_monitor.start()
     pq_logger = StealthCovertOpsPQ(stealth_mode=True)
@@ -1151,3 +1257,6 @@ if __name__ == "__main__":
         cli_main()
     else:
         repl_main()
+
+
+
