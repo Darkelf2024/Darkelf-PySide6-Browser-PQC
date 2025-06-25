@@ -391,8 +391,6 @@ class NetworkProtector:
 
         return base64.b64encode(json.dumps(packet).encode())
 
-# --- Existing CLI code below (unchanged, but now can use above tools) ---
-
 class TorManagerCLI:
     def __init__(self):
         self.tor_process = None
@@ -478,19 +476,42 @@ class TorManagerCLI:
                     config=tor_config,
                     init_msg_handler=lambda line: print("[tor fallback]", line)
                 )
-
-            # Authenticate controller
-            self.controller = Controller.from_port(port=self.control_port)
+            
+            # Wait for the control_auth_cookie to appear and be readable
             cookie_path = os.path.join(tor_config['DataDirectory'], 'control_auth_cookie')
+            self.wait_for_cookie(cookie_path)
+
+            # Connect controller and authenticate using the cookie
+            self.controller = Controller.from_port(port=self.control_port)
             with open(cookie_path, 'rb') as f:
                 cookie = f.read()
-            self.controller.authenticate(password=None, cookie=cookie)
+            self.controller.authenticate(cookie)
             print("[Darkelf] Tor authenticated via cookie.")
-
+            
         except OSError as e:
             print(f"Failed to start Tor: {e}")
         except Exception as e:
             print(f"Unexpected error: {e}")
+
+    def wait_for_cookie(self, cookie_path, timeout=10):
+        start = time.time()
+        while True:
+            try:
+                with open(cookie_path, 'rb'):
+                    return
+            except Exception:
+                if time.time() - start > timeout:
+                    raise TimeoutError("Timed out waiting for Tor control_auth_cookie to appear.")
+                time.sleep(0.2)
+
+    def is_tor_running(self):
+        try:
+            with Controller.from_port(port=self.control_port) as controller:
+                controller.authenticate()
+                return True
+        except Exception as e:
+            print(f"Tor is not running: {e}")
+            return False
 
     def is_tor_running(self):
         try:
@@ -506,9 +527,6 @@ class TorManagerCLI:
         Test a PQC-protected connection routed through Tor's SOCKS5 proxy with jitter and padding.
         """
         try:
-            import socks  # Ensure PySocks is available
-            import time, random
-
             # Create a SOCKS5 proxy socket through Tor
             test_sock = socks.socksocket()
             test_sock.set_proxy(socks.SOCKS5, "127.0.0.1", self.socks_port)
@@ -619,14 +637,32 @@ def encrypt_log(message, key):
     f = Fernet(key)
     return f.encrypt(message.encode())
 
-def get_fernet_key():
-    if not os.path.exists("logkey.bin"):
+def get_fernet_key(path="logkey.bin"):
+    from cryptography.fernet import Fernet
+    import base64, os
+
+    def is_valid_fernet_key(k):
+        try:
+            return len(base64.urlsafe_b64decode(k)) == 32
+        except Exception:
+            return False
+
+    if not os.path.exists(path):
         key = Fernet.generate_key()
-        with open("logkey.bin", "wb") as f:
+        with open(path, "wb") as f:
             f.write(key)
         return key
-    with open("logkey.bin", "rb") as f:
-        return f.read()
+
+    with open(path, "rb") as f:
+        key = f.read().strip()
+
+    if not is_valid_fernet_key(key):
+        print("⚠️ Invalid key file detected. Regenerating secure Fernet key.")
+        key = Fernet.generate_key()
+        with open(path, "wb") as f:
+            f.write(key)
+
+    return key
 
 class KeyEncapsulation:
     def __init__(self, algo="ML-KEM-768"):
@@ -713,7 +749,7 @@ class DarkelfMessenger:
             logging.error("Failed to decrypt message: %s", e)
             return 1
             
-def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=False, method="GET", data=None):
+def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=True, method="GET", data=None):
     proxies = {
         "http": get_tor_proxy(),
         "https": get_tor_proxy()
@@ -744,31 +780,29 @@ def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=Fal
 
 def parse_ddg_lite_results(soup):
     results = []
-    for td in soup.find_all("td"):
-        a = td.find("a", href=True)
-        if a and a['href'].startswith("/l/?"):
-            query = urlparse(a['href']).query
-            qdict = parse_qs(query)
-            uddg = unquote(qdict.get('uddg', [''])[0])
-            label = a.get_text(strip=True)
-            if label and uddg:
-                results.append((label, uddg))
-    if not results:
-        for a in soup.find_all("a", href=True):
-            if a['href'].startswith("/l/?"):
-                query = urlparse(a['href']).query
-                qdict = parse_qs(query)
-                uddg = unquote(qdict.get('uddg', [''])[0])
-                label = a.get_text(strip=True)
-                if label and uddg:
-                    results.append((label, uddg))
+
+    # Try legacy DuckDuckGo format: /l/?uddg=
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        label = a.get_text(strip=True)
+        if href.startswith("/l/?uddg="):
+            parsed = urlparse(href)
+            query = parse_qs(parsed.query)
+            real_url = unquote(query.get("uddg", [""])[0])
+            if real_url and label:
+                results.append((label, real_url))
+        elif href.startswith("http") and label:
+            # Fallback for newer or raw results
+            results.append((label, href))
+
     if not results:
         nores = soup.find(string=lambda text: text and "No results found" in text)
         if nores:
             return "no_results"
+
     return results
 
-def fetch_and_display(url, session=None, extra_stealth_options=None, debug=False):
+def fetch_and_display(url, session=None, extra_stealth_options=None, debug=True):
     html, headers = fetch_with_requests(
         url,
         session=session,
@@ -866,10 +900,10 @@ def decoy_traffic_thread(extra_stealth_options=None):
             pass
 
 def onion_discovery(keywords, extra_stealth_options=None):
-    ahmia = "https://msydqstlz2kzerdg.onion/search/?q=" + quote_plus(keywords)
+    ahmia = "http://juhanurmihxlp77nkq76byazcldy2hlmovfu2epvl5ankdibsot4csyd.onion/search/?q=" + quote_plus(keywords)
     print(f"🌐 Discovering .onion services for: {keywords}")
     try:
-        html, _ = fetch_with_requests(ahmia, extra_stealth_options=extra_stealth_options)
+        html, _ = fetch_with_requests(ahmia, extra_stealth_options=extra_stealth_options, debug=True)
         soup = BeautifulSoup(html, "html.parser")
         seen = set()
         for a in soup.find_all("a", href=True):
@@ -991,8 +1025,8 @@ def repl_main():
         "add_noise_headers": True,
         "minimal_headers": False,
         "spoof_platform": True,
-        "session_isolation": False,
-        "delay_range": (0.1, 1.2)
+        "session_isolation": True,
+        "delay_range": (1.5, 3.0)
     }
     stealth_on = True
     threading.Thread(target=tor_auto_renew_thread, daemon=True).start()
