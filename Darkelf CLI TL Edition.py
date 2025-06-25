@@ -1175,9 +1175,13 @@ def cli_main():
         messenger.send_message(args.pub, args.msg, args.out)
     elif args.command == "receive":
         messenger.receive_message(args.priv, args.msgfile)
-
-# --- REPL Entrypoint ---
+        
 def repl_main():
+    os.environ["HISTFILE"] = ""
+    try:
+        open(os.path.expanduser("~/.bash_history"), "w").close()
+    except:
+        pass
     intrusion_check()
     kernel_monitor = DarkelfKernelMonitor()
     kernel_monitor.start()
@@ -1269,3 +1273,4 @@ if __name__ == "__main__":
         cli_main()
     else:
         repl_main()
+
