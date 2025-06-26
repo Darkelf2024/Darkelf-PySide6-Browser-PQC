@@ -508,23 +508,35 @@ class PhishingDetectorZeroTrace:
 
 class KeyEncapsulation:
     def __init__(self, algo="ML-KEM-768"):
-        self.kem = oqs.KeyEncapsulation(algo)
+        self.algo = algo
+        self.kem = oqs.KeyEncapsulation(self.algo)
         self.privkey = None
         self.pubkey = None
 
     def generate_keypair(self):
+        """Generates a new PQ keypair."""
         self.pubkey = self.kem.generate_keypair()
         self.privkey = self.kem.export_secret_key()
         return self.pubkey
 
+    def export_secret_key(self):
+        """Returns the last generated or imported secret key."""
+        return self.privkey
+
     def import_secret_key(self, privkey_bytes):
+        """Loads a secret key into the encapsulator."""
+        self.kem = oqs.KeyEncapsulation(self.algo)  # re-init for clean state
         self.kem.import_secret_key(privkey_bytes)
         self.privkey = privkey_bytes
 
     def encap_secret(self, pubkey_bytes):
+        """Encapsulates a shared secret to a recipient's public key."""
         return self.kem.encap_secret(pubkey_bytes)
 
     def decap_secret(self, ciphertext):
+        """Decapsulates the shared secret from ciphertext using the private key."""
+        if self.privkey is None:
+            raise ValueError("Private key not set. Use generate_keypair() or import_secret_key().")
         return self.kem.decap_secret(ciphertext)
 
 class NetworkProtector:
@@ -911,36 +923,6 @@ def get_fernet_key(path="logkey.bin"):
             f.write(key)
 
     return key
-
-class KeyEncapsulation:
-    def __init__(self, algo="ML-KEM-768"):
-        self.algo = algo
-        self.kem = oqs.KeyEncapsulation(self.algo)
-        self.privkey = None
-        self.pubkey = None
-
-    def generate_keypair(self):
-        self.pubkey = self.kem.generate_keypair()
-        self.privkey = self.kem.export_secret_key()
-        return self.pubkey
-
-    def export_secret_key(self):
-        return self.privkey
-
-    def import_secret_key(self, privkey_bytes):
-        self.kem = oqs.KeyEncapsulation(self.algo)
-        self.kem.import_secret_key(privkey_bytes)
-        self.privkey = privkey_bytes
-
-    def encap_secret(self, pubkey_bytes):
-        ciphertext, shared_secret = self.kem.encap_secret(pubkey_bytes)
-        return ciphertext, shared_secret
-
-    def decap_secret(self, ciphertext):
-        if self.privkey is None:
-            raise ValueError("Private key not set.")
-        shared_secret = self.kem.decap_secret(ciphertext)
-        return shared_secret
 
 # --- DarkelfMessenger ---
 class DarkelfMessenger:
