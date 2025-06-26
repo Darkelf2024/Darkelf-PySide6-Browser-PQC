@@ -51,7 +51,6 @@
 # NOTE: This is the CLI (Command-Line Interface) edition of Darkelf.
 # It is entirely terminal-based and does not use PyQt5, PySide6, or any GUI frameworks.
 
-
 import os
 import sys
 import time
@@ -69,7 +68,12 @@ import json
 import secrets
 import platform
 import shlex
+import struct
 import subprocess
+import termios
+import tty
+import zlib
+from typing import Optional, List, Dict
 import oqs
 import re
 from datetime import datetime
@@ -126,6 +130,114 @@ KEY_FILES = [
     "history.log", "log.enc", "logkey.bin"
 ]
 
+class DarkelfKernelMonitor(threading.Thread):
+    """
+    Monitors kernel state and flags forensic-risk activity (e.g., swap use).
+    Instead of force shutdown, it sets a cleanup flag and performs secure wipe on exit.
+    """
+    def __init__(self, check_interval=5, parent_app=None):
+        super().__init__(daemon=True)
+        self.check_interval = check_interval
+        self.parent_app = parent_app
+        self.initial_fingerprint = self.system_fingerprint()
+        self._last_swap_active = None
+        self._last_pager_state = None
+        self._last_fingerprint_hash = hash(str(self.initial_fingerprint))
+        self.cleanup_required = False
+
+    def run(self):
+        self.monitor_active = True
+        print("[DarkelfKernelMonitor] ✅ Kernel monitor active.")
+        while True:
+            time.sleep(self.check_interval)
+            swap_now = self.swap_active()
+            if swap_now != self._last_swap_active:
+                if swap_now:
+                    print("\u274c [DarkelfKernelMonitor] Swap is ACTIVE — marking cleanup required!")
+                    self.kill_dynamic_pager()
+                    self.cleanup_required = True
+                self._last_swap_active = swap_now
+
+            pager_now = self.dynamic_pager_running()
+            if pager_now != self._last_pager_state:
+                if pager_now:
+                    print("\u274c [DarkelfKernelMonitor] dynamic_pager is RUNNING")
+                self._last_pager_state = pager_now
+
+            current_fingerprint = self.system_fingerprint()
+            if hash(str(current_fingerprint)) != self._last_fingerprint_hash:
+                print("\u26a0\ufe0f [DarkelfKernelMonitor] Kernel config changed!")
+                self.cleanup_required = True
+                self._last_fingerprint_hash = hash(str(current_fingerprint))
+
+    def swap_active(self):
+        try:
+            with open("/proc/swaps", "r") as f:
+                return len(f.readlines()) > 1  # Header + at least one active swap
+        except Exception:
+            return False
+
+    def dynamic_pager_running(self):
+        try:
+            output = subprocess.check_output(['ps', 'aux'], stderr=subprocess.DEVNULL).decode().lower()
+            return "dynamic_pager" in output
+        except Exception:
+            return False
+
+    def kill_dynamic_pager(self):
+        try:
+            subprocess.run(["sudo", "launchctl", "bootout", "system", "/System/Library/LaunchDaemons/com.apple.dynamic_pager.plist"], check=True)
+            print("\U0001f512 [DarkelfKernelMonitor] dynamic_pager disabled")
+        except subprocess.CalledProcessError:
+            print("\u26a0\ufe0f [DarkelfKernelMonitor] Failed to disable dynamic_pager")
+
+    def secure_delete_swap(self):
+        try:
+            subprocess.run(["sudo", "rm", "-f", "/private/var/vm/swapfile*"], check=True)
+            print("\U0001f4a8 [DarkelfKernelMonitor] Swap files removed")
+        except Exception as e:
+            print(f"\u26a0\ufe0f [DarkelfKernelMonitor] Failed to remove swapfiles: {e}")
+
+    def secure_purge_darkelf_vault(self):
+        vault_paths = [
+            os.path.expanduser("~/Darkelf/Darkelf CLI TL Edition.py"),
+            os.path.expanduser("~/Desktop/Darkelf CLI TL Edition.py"),
+            "/usr/local/bin/Darkelf CLI Browser.py",
+            "/opt/darkelf/Darkelf CLI Browser.py"
+        ]
+        for path in vault_paths:
+            if os.path.exists(path):
+                try:
+                    with open(path, "ba+", buffering=0) as f:
+                        length = f.tell()
+                        f.seek(0)
+                        f.write(secrets.token_bytes(length))
+                    os.remove(path)
+                    print(f"\U0001f4a5 [DarkelfKernelMonitor] Vault destroyed: {path}")
+                except Exception as e:
+                    print(f"\u26a0\ufe0f Failed to delete {path}: {e}")
+
+    def shutdown_darkelf(self):
+        print("\U0001f4a3 [DarkelfKernelMonitor] Shutdown initiated.")
+        if self.cleanup_required:
+            self.secure_delete_swap()
+            self.secure_purge_darkelf_vault()
+        if self.parent_app:
+            self.parent_app.quit()
+        else:
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    def system_fingerprint(self):
+        keys = ["kern.osrevision", "kern.osversion", "kern.bootargs"]
+        results = {}
+        for key in keys:
+            try:
+                val = subprocess.check_output(['sysctl', key], stderr=subprocess.DEVNULL).decode().strip()
+                results[key] = val
+            except Exception:
+                results[key] = "ERROR"
+        return results
+        
 # --- SecureBuffer: RAM-locked buffer for sensitive data ---
 class SecureBuffer:
     """
@@ -394,34 +506,65 @@ class PhishingDetectorZeroTrace:
             except Exception as e:
                 print(f"[PhishingDetector] ⚠️ Log flush failed: {e}")
 
-# --- NetworkProtector: PQ-encrypted, padded, jittered socket comms ---
+class KeyEncapsulation:
+    def __init__(self, algo="ML-KEM-768"):
+        self.kem = oqs.KeyEncapsulation(algo)
+        self.privkey = None
+        self.pubkey = None
+
+    def generate_keypair(self):
+        self.pubkey = self.kem.generate_keypair()
+        self.privkey = self.kem.export_secret_key()
+        return self.pubkey
+
+    def import_secret_key(self, privkey_bytes):
+        self.kem.import_secret_key(privkey_bytes)
+        self.privkey = privkey_bytes
+
+    def encap_secret(self, pubkey_bytes):
+        return self.kem.encap_secret(pubkey_bytes)
+
+    def decap_secret(self, ciphertext):
+        return self.kem.decap_secret(ciphertext)
+
 class NetworkProtector:
-    def __init__(self, sock, peer_kyber_pub_b64: str):
+    def __init__(self, sock, peer_kyber_pub_b64: str, privkey_bytes: bytes = None, direction="outbound", version=1, cover_traffic=True):
         self.sock = sock
         self.secure_random = random.SystemRandom()
         self.peer_pub = base64.b64decode(peer_kyber_pub_b64)
+        self.privkey_bytes = privkey_bytes
+        self.direction = direction
+        self.version = version
+        self.cover_traffic = cover_traffic
+        if cover_traffic:
+            threading.Thread(target=self._cover_traffic_loop, daemon=True).start()
+
+    def _frame_data(self, payload: bytes) -> bytes:
+        return struct.pack(">I", len(payload)) + payload  # 4-byte big-endian length prefix
+
+    def _unframe_data(self, framed: bytes) -> bytes:
+        length = struct.unpack(">I", framed[:4])[0]
+        return framed[4:4 + length]
 
     def add_jitter(self, min_delay=0.05, max_delay=0.3):
         jitter = self.secure_random.uniform(min_delay, max_delay)
         time.sleep(jitter)
-        print(f"[Darkelf] Jitter applied: {jitter:.3f}s")
 
-    def send_with_padding(self, data: bytes, min_padding=128, max_padding=256):
+    def send_with_padding(self, data: bytes, min_padding=128, max_padding=512):
         target_size = max(len(data), self.secure_random.randint(min_padding, max_padding))
         pad_len = target_size - len(data)
-        padded_data = data + os.urandom(pad_len)
-        self.sock.sendall(padded_data)
-        print(f"[Darkelf] Sent padded data (original: {len(data)}, padded: {len(padded_data)}, pad: {pad_len})")
+        padded = data + os.urandom(pad_len)
+        self.sock.sendall(self._frame_data(padded))  # framed for streaming
 
     def send_protected(self, data: bytes):
         self.add_jitter()
-        encrypted = self.encrypt_data_kyber768(data)
+        compressed = zlib.compress(data)
+        encrypted = self.encrypt_data_kyber768(compressed)
         self.send_with_padding(encrypted)
 
     def encrypt_data_kyber768(self, data: bytes) -> bytes:
         kem = KeyEncapsulation("ML-KEM-768")
         ciphertext, shared_secret = kem.encap_secret(self.peer_pub)
-
         salt = os.urandom(16)
         nonce = os.urandom(12)
 
@@ -429,21 +572,72 @@ class NetworkProtector:
             algorithm=hashes.SHA256(),
             length=32,
             salt=salt,
-            info=b"darkelf-transport"
+            info=b"darkelf-net-protect"
         ).derive(shared_secret)
 
         aesgcm = AESGCM(aes_key)
-        encrypted_payload = aesgcm.encrypt(nonce, data, None)
+        payload = {
+            "data": base64.b64encode(data).decode(),
+            "id": secrets.token_hex(4),
+            "ts": datetime.utcnow().isoformat(),
+            "dir": self.direction
+        }
+        plaintext = json.dumps(payload).encode()
+        encrypted_payload = aesgcm.encrypt(nonce, plaintext, None)
 
         packet = {
             "ciphertext": base64.b64encode(ciphertext).decode(),
             "nonce": base64.b64encode(nonce).decode(),
             "payload": base64.b64encode(encrypted_payload).decode(),
             "salt": base64.b64encode(salt).decode(),
-            "version": 1
+            "version": self.version
+        }
+        return base64.b64encode(json.dumps(packet).encode())
+
+    def receive_protected(self, framed_data: bytes):
+        kem = KeyEncapsulation("ML-KEM-768")
+        kem.import_secret_key(self.privkey_bytes)
+        raw = self._unframe_data(framed_data)
+        packet = json.loads(base64.b64decode(raw).decode())
+
+        ciphertext = base64.b64decode(packet["ciphertext"])
+        nonce = base64.b64decode(packet["nonce"])
+        salt = base64.b64decode(packet["salt"])
+        enc_payload = base64.b64decode(packet["payload"])
+
+        shared_secret = kem.decap_secret(ciphertext)
+        aes_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            info=b"darkelf-net-protect"
+        ).derive(shared_secret)
+
+        aesgcm = AESGCM(aes_key)
+        plaintext = aesgcm.decrypt(nonce, enc_payload, None)
+        payload = json.loads(plaintext.decode())
+        compressed_data = base64.b64decode(payload["data"])
+        original_data = zlib.decompress(compressed_data)
+
+        return {
+            "data": original_data,
+            "meta": {
+                "id": payload["id"],
+                "timestamp": payload["ts"],
+                "direction": payload["dir"],
+                "version": packet["version"]
+            }
         }
 
-        return base64.b64encode(json.dumps(packet).encode())
+    def _cover_traffic_loop(self):
+        while True:
+            try:
+                self.add_jitter(0.2, 1.0)
+                fake_data = secrets.token_bytes(self.secure_random.randint(32, 128))
+                self.send_protected(fake_data)
+            except Exception:
+                pass
+            time.sleep(self.secure_random.uniform(15, 45))  # Interval between cover messages
 
 class TorManagerCLI:
     def __init__(self):
@@ -834,27 +1028,33 @@ def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=Tru
 
 def parse_ddg_lite_results(soup):
     results = []
-
-    # Try legacy DuckDuckGo format: /l/?uddg=
     for a in soup.find_all("a", href=True):
         href = a["href"]
         label = a.get_text(strip=True)
-        if href.startswith("/l/?uddg="):
+
+        # Handle redirect wrapper
+        if "redirect_url=" in href:
             parsed = urlparse(href)
             query = parse_qs(parsed.query)
-            real_url = unquote(query.get("uddg", [""])[0])
+            real_url = query.get("redirect_url", [None])[0]
             if real_url and label:
                 results.append((label, real_url))
+
+        # Handle direct links
         elif href.startswith("http") and label:
-            # Fallback for newer or raw results
             results.append((label, href))
 
-    if not results:
-        nores = soup.find(string=lambda text: text and "No results found" in text)
-        if nores:
-            return "no_results"
-
-    return results
+    return results if results else "no_results"
+    
+def check_my_ip():
+    try:
+        html, _ = fetch_with_requests("http://check.torproject.org", debug=False)
+        if "Congratulations. This browser is configured to use Tor." in html:
+            print("✅ You're using Tor correctly. Traffic is routed via Tor.")
+        else:
+            print("❌ Warning: Tor routing not detected by check.torproject.org.")
+    except Exception as e:
+        print(f"⚠️ Failed to verify Tor status: {e}")
 
 def fetch_and_display(url, session=None, extra_stealth_options=None, debug=True):
     html, headers = fetch_with_requests(
@@ -957,7 +1157,7 @@ def onion_discovery(keywords, extra_stealth_options=None):
     ahmia = "http://juhanurmihxlp77nkq76byazcldy2hlmovfu2epvl5ankdibsot4csyd.onion/search/?q=" + quote_plus(keywords)
     print(f"🌐 Discovering .onion services for: {keywords}")
     try:
-        html, _ = fetch_with_requests(ahmia, extra_stealth_options=extra_stealth_options, debug=False)
+        html, _ = fetch_with_requests(ahmia, extra_stealth_options=extra_stealth_options, debug=True)
         soup = BeautifulSoup(html, "html.parser")
         seen = set()
         for a in soup.find_all("a", href=True):
@@ -982,12 +1182,12 @@ def print_help():
         "  recvmsg                — Decrypt & show received message\n"
         "  tornew                 — Request new Tor circuit (if supported)\n"
         "  findonions <keywords>  — Discover .onion services by keywords (no bookmarks/history)\n"
+        "  browser                - Launch Darkelf CLI Browser\n"
         "  wipe                   — Self-destruct and wipe sensitive files\n"
+        "  checkip                — Verify you're routed through Tor\n"
         "  help                   — Show this help\n"
         "  exit                   — Exit browser\n"
     )
-
-import sys
 
 def cli_main():
     setup_logging()
@@ -1012,9 +1212,136 @@ def cli_main():
     elif args.command == "receive":
         messenger.receive_message(args.priv, args.msgfile)
 
-# --- REPL Entrypoint ---
+def get_key():
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        key = sys.stdin.read(1)
+        if key == '\x1b':
+            key += sys.stdin.read(2)
+        return key
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+class Page:
+    def __init__(self, url):
+        self.url = url
+        self.lines = []
+        self.links = []
+        self.error = None
+        self.fetch()
+
+    def fetch(self):
+        try:
+            html, _ = fetch_with_requests(self.url, debug=False)
+            soup = BeautifulSoup(html, 'html.parser')
+
+            for s in soup(['script', 'style']):
+                s.decompose()
+
+            text = soup.get_text(separator='\n')
+            self.links = [
+                (i + 1, a.get_text(strip=True), a.get('href'))
+                for i, a in enumerate(soup.find_all('a'))
+            ]
+
+            for i, (num, label, _) in enumerate(self.links):
+                label = label or "Unnamed link"
+                text = text.replace(label, f"[{num}] {label}", 1)
+
+            self.lines = [l.strip() for l in text.splitlines() if l.strip()]
+        except Exception as e:
+            self.error = str(e)
+
+class DarkelfCLIBrowser:
+    def __init__(self):
+        self.history = []
+        self.forward_stack = []
+        self.current_page = None
+        self.scroll = 0
+        self.height = 20
+
+    def clear(self):
+        os.system('clear' if os.name == 'posix' else 'cls')
+
+    def render(self):
+        self.clear()
+        if not self.current_page:
+            print("No page loaded.")
+            return
+        print(f"\033[1mDarkelf CLI Browser – {self.current_page.url}\033[0m")
+        print("-" * 60)
+        if self.current_page.error:
+            print(f"[!] Error: {self.current_page.error}")
+            return
+        for i in range(self.scroll, min(self.scroll + self.height, len(self.current_page.lines))):
+            print(self.current_page.lines[i][:80])
+        print("-" * 60)
+        print("[↑/↓]: Scroll  |  [o #]: Open Link  |  u: URL  |  b: Back  |  q: Quit")
+
+    def visit(self, url):
+        if self.current_page:
+            self.history.append(self.current_page.url)
+        self.scroll = 0
+        self.forward_stack.clear()
+        self.current_page = Page(url)
+        self.render()
+
+    def open_link(self, number):
+        try:
+            link = dict((num, href) for num, _, href in self.current_page.links)[number]
+            if link:
+                if not link.startswith("http"):
+                    from urllib.parse import urljoin
+                    link = urljoin(self.current_page.url, link)
+                self.visit(link)
+        except:
+            pass
+
+    def run(self):
+        self.visit("https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite")
+        while True:
+            key = get_key()
+            if key in ('q', 'Q'):
+                break
+            elif key in ('\x1b[A', 'w'):
+                if self.scroll > 0:
+                    self.scroll -= 1
+                    self.render()
+            elif key in ('\x1b[B', 's'):
+                if self.scroll + self.height < len(self.current_page.lines):
+                    self.scroll += 1
+                    self.render()
+            elif key == 'u':
+                print("\nEnter URL: ", end="")
+                url = input().strip()
+                if not url.startswith("http"):
+                    url = "https://" + url
+                self.visit(url)
+            elif key == 'b':
+                if self.history:
+                    url = self.history.pop()
+                    self.forward_stack.append(self.current_page.url)
+                    self.visit(url)
+            elif key == 'o':
+                try:
+                    print("\nLink number to open: ", end="")
+                    num = int(input())
+                    self.open_link(num)
+                except:
+                    pass
+            self.render()
+            
 def repl_main():
+    os.environ["HISTFILE"] = ""
+    try:
+        open(os.path.expanduser("~/.bash_history"), "w").close()
+    except:
+        pass
     intrusion_check()
+    kernel_monitor = DarkelfKernelMonitor()
+    kernel_monitor.start()
     mem_monitor = MemoryMonitor()
     mem_monitor.start()
     pq_logger = StealthCovertOpsPQ(stealth_mode=True)
@@ -1040,13 +1367,12 @@ def repl_main():
             cmd = input("darkelf> ").strip()
             if not cmd:
                 continue
+            elif cmd == "checkip":
+                check_my_ip()
             elif cmd == "help":
                 print_help()
-            elif cmd == "tools":
-                print_tools_help()
-            elif cmd.startswith("tool "):
-                tool_name = cmd.split(" ", 1)[1]
-                open_tool(tool_name)
+            elif cmd == "browser":
+                DarkelfCLIBrowser().run()
             elif cmd == "stealth":
                 stealth_on = not stealth_on
                 print("🫥 Extra stealth options are now", "ENABLED" if stealth_on else "DISABLED")
