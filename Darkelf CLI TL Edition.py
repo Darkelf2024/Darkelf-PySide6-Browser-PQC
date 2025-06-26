@@ -71,6 +71,8 @@ import shlex
 import subprocess
 import termios
 import tty
+import struct
+import zlib
 from typing import Optional
 import oqs
 import re
@@ -506,33 +508,65 @@ class PhishingDetectorZeroTrace:
                 print(f"[PhishingDetector] ⚠️ Log flush failed: {e}")
 
 # --- NetworkProtector: PQ-encrypted, padded, jittered socket comms ---
+class KeyEncapsulation:
+    def __init__(self, algo="ML-KEM-768"):
+        self.kem = oqs.KeyEncapsulation(algo)
+        self.privkey = None
+        self.pubkey = None
+
+    def generate_keypair(self):
+        self.pubkey = self.kem.generate_keypair()
+        self.privkey = self.kem.export_secret_key()
+        return self.pubkey
+
+    def import_secret_key(self, privkey_bytes):
+        self.kem.import_secret_key(privkey_bytes)
+        self.privkey = privkey_bytes
+
+    def encap_secret(self, pubkey_bytes):
+        return self.kem.encap_secret(pubkey_bytes)
+
+    def decap_secret(self, ciphertext):
+        return self.kem.decap_secret(ciphertext)
+
 class NetworkProtector:
-    def __init__(self, sock, peer_kyber_pub_b64: str):
+    def __init__(self, sock, peer_kyber_pub_b64: str, privkey_bytes: bytes = None, direction="outbound", version=1, cover_traffic=True):
         self.sock = sock
         self.secure_random = random.SystemRandom()
         self.peer_pub = base64.b64decode(peer_kyber_pub_b64)
+        self.privkey_bytes = privkey_bytes
+        self.direction = direction
+        self.version = version
+        self.cover_traffic = cover_traffic
+        if cover_traffic:
+            threading.Thread(target=self._cover_traffic_loop, daemon=True).start()
+
+    def _frame_data(self, payload: bytes) -> bytes:
+        return struct.pack(">I", len(payload)) + payload  # 4-byte big-endian length prefix
+
+    def _unframe_data(self, framed: bytes) -> bytes:
+        length = struct.unpack(">I", framed[:4])[0]
+        return framed[4:4 + length]
 
     def add_jitter(self, min_delay=0.05, max_delay=0.3):
         jitter = self.secure_random.uniform(min_delay, max_delay)
         time.sleep(jitter)
-        print(f"[Darkelf] Jitter applied: {jitter:.3f}s")
 
-    def send_with_padding(self, data: bytes, min_padding=128, max_padding=256):
+    def send_with_padding(self, data: bytes, min_padding=128, max_padding=512):
         target_size = max(len(data), self.secure_random.randint(min_padding, max_padding))
         pad_len = target_size - len(data)
-        padded_data = data + os.urandom(pad_len)
-        self.sock.sendall(padded_data)
-        print(f"[Darkelf] Sent padded data (original: {len(data)}, padded: {len(padded_data)}, pad: {pad_len})")
+        padded = data + os.urandom(pad_len)
+        self.sock.sendall(self._frame_data(padded))  # framed for streaming
 
     def send_protected(self, data: bytes):
         self.add_jitter()
-        encrypted = self.encrypt_data_kyber768(data)
+        compressed = zlib.compress(data)
+        encrypted = self.encrypt_data_kyber768(compressed)
         self.send_with_padding(encrypted)
 
     def encrypt_data_kyber768(self, data: bytes) -> bytes:
         kem = KeyEncapsulation("ML-KEM-768")
         ciphertext, shared_secret = kem.encap_secret(self.peer_pub)
-
         salt = os.urandom(16)
         nonce = os.urandom(12)
 
@@ -540,21 +574,72 @@ class NetworkProtector:
             algorithm=hashes.SHA256(),
             length=32,
             salt=salt,
-            info=b"darkelf-transport"
+            info=b"darkelf-net-protect"
         ).derive(shared_secret)
 
         aesgcm = AESGCM(aes_key)
-        encrypted_payload = aesgcm.encrypt(nonce, data, None)
+        payload = {
+            "data": base64.b64encode(data).decode(),
+            "id": secrets.token_hex(4),
+            "ts": datetime.utcnow().isoformat(),
+            "dir": self.direction
+        }
+        plaintext = json.dumps(payload).encode()
+        encrypted_payload = aesgcm.encrypt(nonce, plaintext, None)
 
         packet = {
             "ciphertext": base64.b64encode(ciphertext).decode(),
             "nonce": base64.b64encode(nonce).decode(),
             "payload": base64.b64encode(encrypted_payload).decode(),
             "salt": base64.b64encode(salt).decode(),
-            "version": 1
+            "version": self.version
+        }
+        return base64.b64encode(json.dumps(packet).encode())
+
+    def receive_protected(self, framed_data: bytes):
+        kem = KeyEncapsulation("ML-KEM-768")
+        kem.import_secret_key(self.privkey_bytes)
+        raw = self._unframe_data(framed_data)
+        packet = json.loads(base64.b64decode(raw).decode())
+
+        ciphertext = base64.b64decode(packet["ciphertext"])
+        nonce = base64.b64decode(packet["nonce"])
+        salt = base64.b64decode(packet["salt"])
+        enc_payload = base64.b64decode(packet["payload"])
+
+        shared_secret = kem.decap_secret(ciphertext)
+        aes_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            info=b"darkelf-net-protect"
+        ).derive(shared_secret)
+
+        aesgcm = AESGCM(aes_key)
+        plaintext = aesgcm.decrypt(nonce, enc_payload, None)
+        payload = json.loads(plaintext.decode())
+        compressed_data = base64.b64decode(payload["data"])
+        original_data = zlib.decompress(compressed_data)
+
+        return {
+            "data": original_data,
+            "meta": {
+                "id": payload["id"],
+                "timestamp": payload["ts"],
+                "direction": payload["dir"],
+                "version": packet["version"]
+            }
         }
 
-        return base64.b64encode(json.dumps(packet).encode())
+    def _cover_traffic_loop(self):
+        while True:
+            try:
+                self.add_jitter(0.2, 1.0)
+                fake_data = secrets.token_bytes(self.secure_random.randint(32, 128))
+                self.send_protected(fake_data)
+            except Exception:
+                pass
+            time.sleep(self.secure_random.uniform(15, 45))  # Interval between cover messages
 
 class TorManagerCLI:
     def __init__(self):
