@@ -68,14 +68,14 @@ import json
 import secrets
 import platform
 import shlex
+import struct
 import subprocess
 import termios
 import tty
-import struct
 import zlib
-from typing import Optional
 import oqs
 import re
+from typing import Optional, List, Dict
 from datetime import datetime
 import psutil
 from urllib.parse import quote_plus, unquote, parse_qs, urlparse
@@ -86,6 +86,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import requests
+
 
 # --- Logging setup ---
 def setup_logging():
@@ -237,8 +238,7 @@ class DarkelfKernelMonitor(threading.Thread):
             except Exception:
                 results[key] = "ERROR"
         return results
-
-
+        
 # --- SecureBuffer: RAM-locked buffer for sensitive data ---
 class SecureBuffer:
     """
@@ -507,26 +507,37 @@ class PhishingDetectorZeroTrace:
             except Exception as e:
                 print(f"[PhishingDetector] ⚠️ Log flush failed: {e}")
 
-# --- NetworkProtector: PQ-encrypted, padded, jittered socket comms ---
 class KeyEncapsulation:
     def __init__(self, algo="ML-KEM-768"):
-        self.kem = oqs.KeyEncapsulation(algo)
+        self.algo = algo
+        self.kem = oqs.KeyEncapsulation(self.algo)
         self.privkey = None
         self.pubkey = None
 
     def generate_keypair(self):
+        """Generates a new PQ keypair."""
         self.pubkey = self.kem.generate_keypair()
         self.privkey = self.kem.export_secret_key()
         return self.pubkey
 
+    def export_secret_key(self):
+        """Returns the last generated or imported secret key."""
+        return self.privkey
+
     def import_secret_key(self, privkey_bytes):
+        """Loads a secret key into the encapsulator."""
+        self.kem = oqs.KeyEncapsulation(self.algo)  # re-init for clean state
         self.kem.import_secret_key(privkey_bytes)
         self.privkey = privkey_bytes
 
     def encap_secret(self, pubkey_bytes):
+        """Encapsulates a shared secret to a recipient's public key."""
         return self.kem.encap_secret(pubkey_bytes)
 
     def decap_secret(self, ciphertext):
+        """Decapsulates the shared secret from ciphertext using the private key."""
+        if self.privkey is None:
+            raise ValueError("Private key not set. Use generate_keypair() or import_secret_key().")
         return self.kem.decap_secret(ciphertext)
 
 class NetworkProtector:
@@ -914,36 +925,6 @@ def get_fernet_key(path="logkey.bin"):
 
     return key
 
-class KeyEncapsulation:
-    def __init__(self, algo="ML-KEM-768"):
-        self.algo = algo
-        self.kem = oqs.KeyEncapsulation(self.algo)
-        self.privkey = None
-        self.pubkey = None
-
-    def generate_keypair(self):
-        self.pubkey = self.kem.generate_keypair()
-        self.privkey = self.kem.export_secret_key()
-        return self.pubkey
-
-    def export_secret_key(self):
-        return self.privkey
-
-    def import_secret_key(self, privkey_bytes):
-        self.kem = oqs.KeyEncapsulation(self.algo)
-        self.kem.import_secret_key(privkey_bytes)
-        self.privkey = privkey_bytes
-
-    def encap_secret(self, pubkey_bytes):
-        ciphertext, shared_secret = self.kem.encap_secret(pubkey_bytes)
-        return ciphertext, shared_secret
-
-    def decap_secret(self, ciphertext):
-        if self.privkey is None:
-            raise ValueError("Private key not set.")
-        shared_secret = self.kem.decap_secret(ciphertext)
-        return shared_secret
-
 # --- DarkelfMessenger ---
 class DarkelfMessenger:
     def __init__(self, kem_algo="ML-KEM-768"):
@@ -1155,6 +1136,24 @@ def decoy_traffic_thread(extra_stealth_options=None):
         except Exception:
             pass
 
+def get_terminal_size():
+    return shutil.get_terminal_size((80, 20))
+
+def paginate_output(text):
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        width, height = shutil.get_terminal_size((80, 20))
+        page_size = height - 2  # reserve lines for prompt
+
+        os.system('clear')
+        for line in lines[i:i + page_size]:
+            print(line[:width])  # truncate long lines
+
+        i += page_size
+        if i < len(lines):
+            input("\n-- More -- Press Enter to continue...")
+            
 def onion_discovery(keywords, extra_stealth_options=None):
     ahmia = "http://juhanurmihxlp77nkq76byazcldy2hlmovfu2epvl5ankdibsot4csyd.onion/search/?q=" + quote_plus(keywords)
     print(f"🌐 Discovering .onion services for: {keywords}")
@@ -1233,7 +1232,7 @@ def print_help():
         "  tornew                 — Request new Tor circuit (if supported)\n"
         "  findonions <keywords>  — Discover .onion services by keywords (no bookmarks/history)\n"
         "  tool <name>            — Install and launch terminal tool\n"
-        "  tool                   — List available terminal tools\n"
+        "  tools                  — List available terminal tools\n"
         "  browser                - Launch Darkelf CLI Browser\n"
         "  wipe                   — Self-destruct and wipe sensitive files\n"
         "  checkip                — Verify you're routed through Tor\n"
@@ -1384,7 +1383,7 @@ class DarkelfCLIBrowser:
                 except:
                     pass
             self.render()
-
+            
 def repl_main():
     os.environ["HISTFILE"] = ""
     try:
@@ -1482,6 +1481,9 @@ if __name__ == "__main__":
     cli_commands = {"generate-keys", "send", "receive"}
     if len(sys.argv) > 1 and sys.argv[1] in cli_commands:
         cli_main()
+    else:
+        repl_main()
+
     else:
         repl_main()
 
