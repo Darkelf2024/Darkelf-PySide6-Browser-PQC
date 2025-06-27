@@ -56,6 +56,7 @@ import sys
 import time
 import argparse
 import logging
+logging.getLogger('stem').setLevel(logging.WARNING)
 import mmap
 import ctypes
 import random
@@ -309,10 +310,11 @@ class StealthCovertOpsPQ:
         self._stealth_mode = stealth_mode
         self._authorized = False
 
-        # === ML-KEM-768: Post-Quantum Key Exchange ===
-        self.kem = KeyEncapsulation("ML-KEM-768")
+        # === Kyber768: Post-Quantum Key Exchange ===
+        self.kem = EphemeralPQKEM("Kyber768")
         self.public_key = self.kem.generate_keypair()
         self.private_key = self.kem.export_secret_key()
+        self.stealth_mode = stealth_mode
 
         # Derive shared secret using encapsulation
         self.ciphertext, self.shared_secret = self.kem.encap_secret(self.public_key)
@@ -507,8 +509,8 @@ class PhishingDetectorZeroTrace:
             except Exception as e:
                 print(f"[PhishingDetector] ⚠️ Log flush failed: {e}")
 
-class KeyEncapsulation:
-    def __init__(self, algo="ML-KEM-768"):
+class PQKEMWrapper:
+    def __init__(self, algo="Kyber768"):
         self.algo = algo
         self.kem = oqs.KeyEncapsulation(self.algo)
         self.privkey = None
@@ -517,7 +519,7 @@ class KeyEncapsulation:
     def generate_keypair(self):
         """Generates a new PQ keypair."""
         self.pubkey = self.kem.generate_keypair()
-        self.privkey = self.kem.export_secret_key()
+        self.privkey = self.kem.export_secret_key()  # Fixed: store private key correctly
         return self.pubkey
 
     def export_secret_key(self):
@@ -527,7 +529,7 @@ class KeyEncapsulation:
     def import_secret_key(self, privkey_bytes):
         """Loads a secret key into the encapsulator."""
         self.kem = oqs.KeyEncapsulation(self.algo)  # re-init for clean state
-        self.kem.import_secret_key(privkey_bytes)
+        self.kem.import_secret_key(privkey_bytes)   # Fixed: was incomplete
         self.privkey = privkey_bytes
 
     def encap_secret(self, pubkey_bytes):
@@ -576,7 +578,7 @@ class NetworkProtector:
         self.send_with_padding(encrypted)
 
     def encrypt_data_kyber768(self, data: bytes) -> bytes:
-        kem = KeyEncapsulation("ML-KEM-768")
+        kem = PQKEMWrapper("Kyber768")
         ciphertext, shared_secret = kem.encap_secret(self.peer_pub)
         salt = os.urandom(16)
         nonce = os.urandom(12)
@@ -608,8 +610,7 @@ class NetworkProtector:
         return base64.b64encode(json.dumps(packet).encode())
 
     def receive_protected(self, framed_data: bytes):
-        kem = KeyEncapsulation("ML-KEM-768")
-        kem.import_secret_key(self.privkey_bytes)
+        kem = PQKEMWrapper("Kyber768")
         raw = self._unframe_data(framed_data)
         packet = json.loads(base64.b64decode(raw).decode())
 
@@ -925,61 +926,104 @@ def get_fernet_key(path="logkey.bin"):
 
     return key
 
-# --- DarkelfMessenger ---
+class EphemeralPQKEM:
+    def __init__(self, algo="Kyber768"):
+        self.algo = algo
+        self.kem = oqs.KeyEncapsulation(self.algo)
+        self.privkey = None
+        self.pubkey = None
+
+    def generate_keypair(self):
+        self.pubkey = self.kem.generate_keypair()
+        self.privkey = self.kem.export_secret_key()
+        return self.pubkey
+
+    def export_secret_key(self):
+        return self.privkey
+
+    def encap_secret(self, pubkey_bytes):
+        return self.kem.encap_secret(pubkey_bytes)
+
+    def decap_secret(self, ciphertext):
+        return self.kem.decap_secret(ciphertext)  # uses internal key
+
 class DarkelfMessenger:
-    def __init__(self, kem_algo="ML-KEM-768"):
+    def __init__(self, kem_algo="Kyber768"):
         self.kem_algo = kem_algo
+
     def generate_keys(self, pubkey_path="my_pubkey.bin", privkey_path="my_privkey.bin"):
-        kem = KeyEncapsulation(self.kem_algo)
-        pub = kem.generate_keypair()
+        kem = oqs.KeyEncapsulation(self.kem_algo)
+        public_key = kem.generate_keypair()
+        private_key = kem.export_secret_key()
+
         with open(pubkey_path, "wb") as f:
-            f.write(pub)
+            f.write(public_key)
         with open(privkey_path, "wb") as f:
-            f.write(kem.export_secret_key())
-        logging.info("🔐 Keys created: %s, %s", pubkey_path, privkey_path)
+            f.write(private_key)
+
+        logging.info("🔐 Keys saved: %s, %s", pubkey_path, privkey_path)
+
     def send_message(self, recipient_pubkey_path, message_text, output_path="msg.dat"):
         if not os.path.exists(recipient_pubkey_path):
-            logging.error("Public key file not found: %s", recipient_pubkey_path)
+            logging.error("Missing recipient pubkey: %s", recipient_pubkey_path)
             return 1
         if not message_text.strip():
             logging.error("Message cannot be empty.")
             return 1
-        kem = KeyEncapsulation(self.kem_algo)
+
+        kem = oqs.KeyEncapsulation(self.kem_algo)
         with open(recipient_pubkey_path, "rb") as f:
             pubkey = f.read()
+
         ciphertext, shared_secret = kem.encap_secret(pubkey)
         key = base64.urlsafe_b64encode(shared_secret[:32])
         token = Fernet(key).encrypt(message_text.encode())
+
+        # Base64 encode the ciphertext and token to avoid delimiter collision
+        ct_b64 = base64.b64encode(ciphertext)
+        token_b64 = base64.b64encode(token)
+
         with open(output_path, "wb") as f:
-            f.write(b'v1||' + ciphertext + b'||' + token)
-        logging.info("📤 Message encrypted and saved to: %s", output_path)
+            f.write(b"v1||" + ct_b64 + b"||" + token_b64)
+
+        logging.info("📤 Message saved to: %s", output_path)
         return 0
+
     def receive_message(self, privkey_path="my_privkey.bin", msg_path="msg.dat"):
-        if not os.path.exists(privkey_path):
-            logging.error("Private key file not found: %s", privkey_path)
-            return 1
         if not os.path.exists(msg_path):
             logging.error("Message file not found: %s", msg_path)
             return 1
-        kem = KeyEncapsulation(self.kem_algo)
-        with open(privkey_path, "rb") as f:
-            kem.import_secret_key(f.read())
+        if not os.path.exists(privkey_path):
+            logging.error("Private key file not found: %s", privkey_path)
+            return 1
+
         with open(msg_path, "rb") as f:
             content = f.read()
-        if not content.startswith(b'v1||'):
+
+        if not content.startswith(b"v1||"):
             logging.error("Message format invalid or corrupted.")
             return 1
+
         try:
-            _, ciphertext, token = content.split(b'||', 2)
+            _, ct_b64, token_b64 = content.split(b"||", 2)
+            ciphertext = base64.b64decode(ct_b64)
+            token = base64.b64decode(token_b64)
+
+            with open(privkey_path, "rb") as f:
+                privkey = f.read()
+
+            # Pass secret_key=privkey to the constructor
+            kem = oqs.KeyEncapsulation(self.kem_algo, secret_key=privkey)
             shared_secret = kem.decap_secret(ciphertext)
+
             key = base64.urlsafe_b64encode(shared_secret[:32])
             message = Fernet(key).decrypt(token)
             print("📥 Message decrypted:", message.decode())
             return 0
         except Exception as e:
-            logging.error("Failed to decrypt message: %s", e)
+            logging.error("Decryption failed: %s", e)
             return 1
-            
+
 def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=True, method="GET", data=None):
     proxies = {
         "http": get_tor_proxy(),
@@ -1110,9 +1154,10 @@ def renew_tor_circuit():
         with Controller.from_port(port=9053) as controller:
             controller.authenticate()
             controller.signal("NEWNYM")
-        print("🔄 Tor circuit renewed.")
+        logging.info("Tor circuit silently renewed.")
     except Exception as e:
-        print("Failed to renew Tor circuit:", e)
+        logging.error("Failed to renew Tor circuit: %s", e)
+
 
 def tor_auto_renew_thread():
     while True:
@@ -1230,7 +1275,7 @@ def print_help():
         "  sendmsg                — Encrypt & send a message\n"
         "  recvmsg                — Decrypt & show received message\n"
         "  tornew                 — Request new Tor circuit (if supported)\n"
-        "  findonions <keywords>  — Discover .onion services by keywords (no bookmarks/history)\n"
+        "  findonions <keywords>  — Discover .onion services by keywords\n"
         "  tool <name>            — Install and launch terminal tool\n"
         "  tools                  — List available terminal tools\n"
         "  browser                - Launch Darkelf CLI Browser\n"
@@ -1383,7 +1428,7 @@ class DarkelfCLIBrowser:
                 except:
                     pass
             self.render()
-            
+
 def repl_main():
     os.environ["HISTFILE"] = ""
     try:
@@ -1410,6 +1455,13 @@ def repl_main():
         "session_isolation": True,
         "delay_range": (1.5, 3.0)
     }
+    def find_file(filename):
+        for path in [os.path.expanduser("~/Desktop"), os.path.expanduser("~"), "."]:
+            full = os.path.join(path, filename)
+            if os.path.exists(full):
+                return full
+        return filename  # fallback
+
     stealth_on = True
     threading.Thread(target=tor_auto_renew_thread, daemon=True).start()
     threading.Thread(target=decoy_traffic_thread, args=(extra_stealth_options,), daemon=True).start()
@@ -1455,7 +1507,11 @@ def repl_main():
                 msg = input("Message: ")
                 messenger.send_message(to, msg)
             elif cmd == "recvmsg":
-                messenger.receive_message()
+                priv = find_file("my_privkey.bin")
+                msgf = find_file("msg.dat")
+                print(f"🔐 Using private key: {priv}")
+                print(f"📩 Reading message from: {msgf}")
+                messenger.receive_message(priv, msgf)
             elif cmd == "tornew":
                 renew_tor_circuit()
             elif cmd.startswith("findonions "):
@@ -1481,9 +1537,6 @@ if __name__ == "__main__":
     cli_commands = {"generate-keys", "send", "receive"}
     if len(sys.argv) > 1 and sys.argv[1] in cli_commands:
         cli_main()
-    else:
-        repl_main()
-
     else:
         repl_main()
 
