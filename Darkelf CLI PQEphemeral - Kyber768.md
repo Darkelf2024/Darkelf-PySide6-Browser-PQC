@@ -28,12 +28,12 @@ This is a command-line secure messaging tool using **Kyber768**, a post-quantum 
 
 ## 📦 Setup Guide
 
-### 1. Clone and Build `liboqs 0.13.1`
+### 1. Clone and Build `liboqs 0.13.0`
 
 ```bash
 git clone --branch main https://github.com/open-quantum-safe/liboqs.git ~/liboqs
 cd ~/liboqs
-git checkout 0.13.0-0.13.1
+git checkout 0.13.0
 
 mkdir build && cd build
 cmake -DCMAKE_INSTALL_PREFIX=/usr/local ..
