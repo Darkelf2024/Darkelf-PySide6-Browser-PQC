@@ -1,6 +1,6 @@
 # 🔐 Darkelf CLI PQEphemeral — Kyber768 Encrypted Messaging
 
-This is a command-line secure messaging tool using **Kyber768**, a post-quantum key encapsulation mechanism from the [Open Quantum Safe](https://openquantumsafe.org) project. It is based on `liboqs 0.13.1` and `liboqs-python 0.13.0`, providing ephemeral encryption for message confidentiality.
+This is a command-line secure messaging tool using **Kyber768**, a post-quantum key encapsulation mechanism from the [Open Quantum Safe](https://openquantumsafe.org) project. It is based on `liboqs-python 0.13.0`, providing ephemeral encryption for message confidentiality.
 
 ---
 
