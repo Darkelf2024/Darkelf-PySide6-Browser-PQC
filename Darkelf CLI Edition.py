@@ -56,7 +56,6 @@ import sys
 import time
 import argparse
 import logging
-logging.getLogger('stem').disabled = True
 import mmap
 import ctypes
 import random
@@ -91,7 +90,8 @@ import requests
 
 # --- Logging setup ---
 def setup_logging():
-    logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+    logging.getLogger('stem').disabled = True
+    setup_logging()
     
 # --- Tor integration via Stem ---
 import stem.process
