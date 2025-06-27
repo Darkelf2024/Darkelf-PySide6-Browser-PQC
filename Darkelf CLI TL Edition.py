@@ -56,7 +56,7 @@ import sys
 import time
 import argparse
 import logging
-logging.getLogger('stem').setLevel(logging.WARNING)
+logging.getLogger('stem').disabled = True
 import mmap
 import ctypes
 import random
