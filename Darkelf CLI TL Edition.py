@@ -88,11 +88,26 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import requests
 
 
-# --- Logging setup ---
 def setup_logging():
+    # Disable specific library loggers
     logging.getLogger('stem').disabled = True
-    setup_logging()
-    
+    logging.getLogger('urllib3').disabled = True
+    logging.getLogger('requests').disabled = True
+    logging.getLogger('torpy').disabled = True
+    logging.getLogger('socks').disabled = True
+    logging.getLogger('httpx').disabled = True
+    logging.getLogger('aiohttp').disabled = True
+    logging.getLogger('asyncio').disabled = True
+
+    # Optional: shut down *all* logging unless explicitly re-enabled
+    logging.basicConfig(level=logging.CRITICAL)
+
+    # Bonus: catch any logs that somehow sneak through
+    logging.getLogger().addHandler(logging.NullHandler())
+
+# Call this early in your main script
+setup_logging()
+
 # --- Tor integration via Stem ---
 import stem.process
 from stem.control import Controller
@@ -1024,7 +1039,7 @@ class DarkelfMessenger:
             logging.error("Decryption failed: %s", e)
             return 1
 
-def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=True, method="GET", data=None):
+def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=False, method="GET", data=None):
     proxies = {
         "http": get_tor_proxy(),
         "https": get_tor_proxy()
@@ -1216,74 +1231,137 @@ def onion_discovery(keywords, extra_stealth_options=None):
     except Exception as e:
         print("  ▪ Error during onion discovery:", e)
 
+# 🌐 Global list of supported tools
+TOOLS = [
+    "sherlock", "shodan", "recon-ng", "theharvester", "nmap", "yt-dlp",
+    "maltego", "masscan", "amass", "subfinder", "exiftool", "mat2",
+    "neomutt", "dnstwist", "gitleaks", "httpx", "p0f", "thunderbird"
+]
+
 def open_tool(tool):
     """
-    Install and open a terminal tool by name via platform-specific method.
+    Open a terminal tool by name in a new window, installing via Homebrew if missing.
     """
-    allowed_tools = [
-        "sherlock", "shodan", "recon-ng", "theharvester", "nmap", "yt-dlp", "maltego", "masscan",
-        "amass", "subfinder", "exiftool", "mat2", "neomutt", "thunderbird", "dnstwist", "gitleaks", "httpx", "p0f"
-    ]
+    allowed_tools = TOOLS
     tool = tool.lower()
     if tool not in allowed_tools:
         print(f"Tool '{tool}' is not in the allowed list.")
         return
 
-    sanitized_tool = shlex.quote(tool)
     system = platform.system()
+
+    def is_installed(tool_name):
+        try:
+            subprocess.run(["which", tool_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            return True
+        except subprocess.CalledProcessError:
+            return False
+
     try:
         if system == "Darwin":  # macOS
+            if is_installed(tool):
+                command = f"{tool}"
+            else:
+                print(f"📦 Installing '{tool}' via Homebrew...")
+                command = f"brew install {tool}; {tool}"
             subprocess.run([
                 "osascript", "-e",
                 f'''tell application "Terminal"
-do script "brew install {sanitized_tool} && exec $SHELL"
-activate
+    do script "{command}"
+    activate
 end tell'''
             ], check=True)
+
         elif system == "Linux":
+            if is_installed(tool):
+                command = f"{tool}"
+            else:
+                print(f"📦 Installing '{tool}' via Homebrew...")
+                command = f"brew install {tool} && {tool}"
             subprocess.run([
-                "gnome-terminal", "--", "sh", "-c",
-                f"brew install {sanitized_tool} && exec bash"
+                "gnome-terminal", "--", "sh", "-c", f"{command}; exec bash"
             ], check=True)
+
         elif system == "Windows":
+            command = f"{tool}" if is_installed(tool) else f"brew install {tool} && {tool}"
             subprocess.run([
-                "cmd.exe", "/c", "start", "cmd.exe", "/k",
-                f"brew install {sanitized_tool}"
+                "cmd.exe", "/c", "start", "cmd.exe", "/k", command
             ], check=True)
+
         else:
             print(f"Unsupported platform: {system}")
-    except Exception as e:
-        print(f"Failed to open/install tool '{tool}': {e}")
 
-def print_tools_help():
-    print(
-        "Tools CLI usage:\n"
-        "  tool <name>      — Install and launch terminal tool\n"
-        "Available tools:\n"
-        "  sherlock, shodan, recon-ng, theharvester, nmap, yt-dlp, maltego, masscan,\n"
-        "  amass, subfinder, exiftool, mat2, neomutt, dnstwist, gitleaks, httpx, p0f, thunderbird\n"
-    )
+    except Exception as e:
+        print(f"❌ Failed to open tool '{tool}': {e}")
+
 
 def print_help():
-    print(
-        "Commands:\n"
-        "  search <keywords>      — Search DuckDuckGo (onion)\n"
-        "  duck                   — Open DuckDuckGo homepage (onion)\n"
-        "  debug <keywords>       — Search and show full debug info\n"
-        "  stealth                — Toggle extra stealth options\n"
-        "  genkeys                — Generate post-quantum keys\n"
-        "  sendmsg                — Encrypt & send a message\n"
-        "  recvmsg                — Decrypt & show received message\n"
-        "  tornew                 — Request new Tor circuit (if supported)\n"
-        "  findonions <keywords>  — Discover .onion services by keywords\n"
-        "  tool <name>            — Install and launch terminal tool\n"
-        "  tools                  — List available terminal tools\n"
-        "  browser                - Launch Darkelf CLI Browser\n"
-        "  wipe                   — Self-destruct and wipe sensitive files\n"
-        "  checkip                — Verify you're routed through Tor\n"
-        "  help                   — Show this help\n"
-        "  exit                   — Exit browser\n"
-    )
+    print("Darkelf CLI Browser — Command Reference\n")
+    print("Select by number or type full command:\n")
+
+    commands = [
+        ("search <keywords>",     "Search DuckDuckGo (onion)"),
+        ("duck",                  "Open DuckDuckGo homepage (onion)"),
+        ("debug <keywords>",      "Search and show full debug info"),
+        ("stealth",               "Toggle extra stealth options"),
+        ("genkeys",               "Generate post-quantum keys"),
+        ("sendmsg",               "Encrypt & send a message"),
+        ("recvmsg",               "Decrypt & show received message"),
+        ("tornew",                "Request new Tor circuit (if supported)"),
+        ("findonions <keywords>", "Discover .onion services by keywords"),
+        ("tool <name>",           "Install and launch a terminal tool"),
+        ("tools",                 "List available terminal tools"),
+        ("toolinfo",              "Show descriptions of each tool"),
+        ("browser",               "Launch Darkelf CLI Browser"),
+        ("wipe",                  "Self-destruct and wipe sensitive files"),
+        ("checkip",               "Verify you're routed through Tor"),
+        ("help",                  "Show this help menu"),
+        ("exit",                  "Exit the browser")
+    ]
+
+    for idx, (cmd, desc) in enumerate(commands, start=1):
+        print(f"  {idx:>2}. {cmd:<24} — {desc}")
+        
+def print_toolinfo():
+    tool_descriptions = {
+        "sherlock": "Find usernames across social networks",
+        "shodan": "Search engine for internet-connected devices",
+        "recon-ng": "Web recon framework with modules",
+        "theharvester": "Collect emails, domains, hosts",
+        "nmap": "Port scanner and network mapper",
+        "yt-dlp": "Download videos from YouTube and more",
+        "maltego": "Graphical link analysis tool",
+        "masscan": "Internet-scale port scanner",
+        "amass": "Subdomain discovery and asset mapping",
+        "subfinder": "Passive subdomain discovery",
+        "exiftool": "Read and write file metadata",
+        "mat2": "Metadata anonymization toolkit",
+        "neomutt": "Command-line email client",
+        "dnstwist": "Find typo-squatting/phishing domains",
+        "gitleaks": "Scan repos for secrets and keys",
+        "httpx": "HTTP toolkit for probing web services",
+        "p0f": "Passive OS fingerprinting tool",
+        "thunderbird": "Secure GUI email client"
+    }
+
+    print("\nTool Descriptions:\n")
+    for i, (tool, desc) in enumerate(tool_descriptions.items(), start=1):
+        print(f"  {i:>2}. {tool:<12} — {desc}")
+    print()
+    
+def print_tools_help():
+    print("Tools CLI Usage:")
+    print("  tool <number>     — Install and launch the selected terminal tool\n")
+    print("Available Tools:")
+
+    half = len(TOOLS) // 2
+    col1 = TOOLS[:half]
+    col2 = TOOLS[half:]
+
+    for i in range(half):
+        left = f"{i+1:>2}. {col1[i]:<12}"
+        right = f"{i+1+half:>2}. {col2[i]}"
+        print(f"  {left} {right}")
 
 def cli_main():
     setup_logging()
@@ -1470,6 +1548,19 @@ def repl_main():
             cmd = input("darkelf> ").strip()
             if not cmd:
                 continue
+            # Launch tool by number (1–18)
+            if cmd.isdigit():
+                index = int(cmd) - 1
+                if 0 <= index < len(TOOLS):
+                    tool_name = TOOLS[index]
+                    print(f"🛠️  Launching tool: {tool_name}")
+                    open_tool(tool_name)
+                    continue
+            # Launch tool by exact name
+            if cmd.lower() in TOOLS:
+                print(f"🛠️  Launching tool: {cmd.lower()}")
+                open_tool(cmd.lower())
+                continue
             elif cmd == "checkip":
                 check_my_ip()
             elif cmd == "help":
@@ -1479,6 +1570,8 @@ def repl_main():
             elif cmd.startswith("tool "):
                 tool_name = cmd.split(" ", 1)[1]
                 open_tool(tool_name)
+            elif cmd == "toolinfo":
+                print_toolinfo()
             elif cmd == "browser":
                 DarkelfCLIBrowser().run()
             elif cmd == "stealth":
@@ -1539,4 +1632,5 @@ if __name__ == "__main__":
         cli_main()
     else:
         repl_main()
+
 
