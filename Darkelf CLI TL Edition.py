@@ -75,6 +75,7 @@ import tty
 import zlib
 import oqs
 import re
+from collections import deque
 from typing import Optional, List, Dict
 from datetime import datetime
 import psutil
@@ -1600,6 +1601,51 @@ class DarkelfCLIBrowser:
                 except:
                     pass
 
+def interactive_prompt():
+
+    buffer = []
+    history = deque([], maxlen=100)
+    cursor = 0
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        console.print("[bold green]>>[/bold green] ", end="", soft_wrap=True)
+        sys.stdout.flush()
+
+        while True:
+            key = sys.stdin.read(1)
+            if key == '\x1b':
+                key += sys.stdin.read(2)
+
+            if key == '\r':  # Enter
+                print()
+                cmd = ''.join(buffer)
+                history.append(cmd)
+                return cmd
+
+            elif key == '\x7f':  # Backspace
+                if buffer:
+                    buffer.pop()
+                    cursor -= 1
+                    print('\b \b', end='', flush=True)
+
+            elif key == '\x1b[A':  # Up (history stub)
+                pass
+            elif key == '\x1b[B':  # Down
+                pass
+            elif key == '\x1b[C':  # Right
+                pass
+            elif key == '\x1b[D':  # Left
+                pass
+            else:
+                buffer.append(key)
+                print(key, end='', flush=True)
+                cursor += 1
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
 def repl_main():
     os.environ["HISTFILE"] = ""
     try:
@@ -1726,6 +1772,7 @@ if __name__ == "__main__":
         cli_main()
     else:
         repl_main()
+
 
 
 
