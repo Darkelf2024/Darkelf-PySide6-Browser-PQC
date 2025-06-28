@@ -30,6 +30,17 @@ Darkelf CLI Browser is a command-line privacy tool built for high-threat environ
 - obfs4proxy (optional but recommended)
 - `pip install -r requirements.txt`
 
+## Licenses & Attributions
+
+This software makes use of the following third-party libraries:
+
+- [psutil](https://github.com/giampaolo/psutil) - BSD 3-Clause License
+- [Rich](https://github.com/Textualize/rich) - MIT License
+- [liboqs](https://github.com/open-quantum-safe/liboqs) and [pyoqs](https://github.com/open-quantum-safe/pyoqs) - BSD 2-Clause and MIT Licenses
+- [BeautifulSoup4](https://www.crummy.com/software/BeautifulSoup/) - MIT License
+- [Cryptography](https://github.com/pyca/cryptography) - Apache License 2.0
+- [Requests](https://requests.readthedocs.io/) - Apache License 2.0
+
 ---
 
 Works on MacM1-M4, Windows, Linux, and Android(Termux Recommended)
