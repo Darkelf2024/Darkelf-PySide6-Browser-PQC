@@ -56,6 +56,7 @@ import sys
 import time
 import argparse
 import logging
+import asyncio
 import mmap
 import ctypes
 import random
@@ -76,6 +77,8 @@ import tty
 import zlib
 import oqs
 import re
+import ssl
+import tls_client
 from collections import deque
 from typing import Optional, List, Dict
 from datetime import datetime
@@ -713,7 +716,7 @@ class TorManagerCLI:
                 return
 
             bridges = [
-                "obfs4 185.177.207.158:8443 B9E39FA01A5C72F0774A840F91BC72C2860954E5 cert=WA1P+AQj7sAZV9terWaYV6ZmhBUcj89Ev8ropu/IED4OAtqFm7AdPHB168BPoW3RrN0NfA iat-mode=0",
+               # "obfs4 185.177.207.158:8443 B9E39FA01A5C72F0774A840F91BC72C2860954E5 cert=WA1P+AQj7sAZV9terWaYV6ZmhBUcj89Ev8ropu/IED4OAtqFm7AdPHB168BPoW3RrN0NfA iat-mode=0",
                 "obfs4 91.227.77.152:465 42C5E354B0B9028667CFAB9705298F8C3623A4FB cert=JKS4que9Waw8PyJ0YRmx3QrSxv/YauS7HfxzmR51rCJ/M9jCKscJu7SOuz//dmzGJiMXdw iat-mode=2"
             ]
             random.shuffle(bridges)
@@ -1049,8 +1052,6 @@ class DarkelfMessenger:
             logging.error("Decryption failed: %s", e)
             return 1
 
-import requests
-
 def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=False, method="GET", data=None):
     proxies = {
         "http": get_tor_proxy(),
@@ -1246,6 +1247,70 @@ def onion_discovery(keywords, extra_stealth_options=None):
     except Exception as e:
         console.print("  ▪ Error during onion discovery:", e)
 
+# 🌐 Global list of supported tools
+TOOLS = [
+    "sherlock", "shodan", "recon-ng", "theharvester", "nmap", "yt-dlp",
+    "maltego", "masscan", "amass", "subfinder", "exiftool", "mat2",
+    "neomutt", "dnstwist", "gitleaks", "httpx", "p0f", "thunderbird"
+]
+
+def open_tool(tool):
+    """
+    Open a terminal tool by name in a new window, installing via Homebrew if missing.
+    """
+    allowed_tools = TOOLS
+    tool = tool.lower()
+    if tool not in allowed_tools:
+        console.print(f"Tool '{tool}' is not in the allowed list.")
+        return
+
+    system = platform.system()
+
+    def is_installed(tool_name):
+        try:
+            subprocess.run(["which", tool_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            return True
+        except subprocess.CalledProcessError:
+            return False
+
+    try:
+        if system == "Darwin":  # macOS
+            if is_installed(tool):
+                command = f"{tool}"
+            else:
+                console.print(f"📦 Installing '{tool}' via Homebrew...")
+                command = f"brew install {tool}; {tool}"
+            subprocess.run([
+                "osascript", "-e",
+                f'''tell application "Terminal"
+    do script "{command}"
+    activate
+end tell'''
+            ], check=True)
+
+        elif system == "Linux":
+            if is_installed(tool):
+                command = f"{tool}"
+            else:
+                console.print(f"📦 Installing '{tool}' via Homebrew...")
+                command = f"brew install {tool} && {tool}"
+            subprocess.run([
+                "gnome-terminal", "--", "sh", "-c", f"{command}; exec bash"
+            ], check=True)
+
+        elif system == "Windows":
+            command = f"{tool}" if is_installed(tool) else f"brew install {tool} && {tool}"
+            subprocess.run([
+                "cmd.exe", "/c", "start", "cmd.exe", "/k", command
+            ], check=True)
+
+        else:
+            console.print(f"Unsupported platform: {system}")
+
+    except Exception as e:
+        console.print(f"❌ Failed to open tool '{tool}': {e}")
+
+
 def print_help():
     console.print("Darkelf CLI Browser — Command Reference\n")
     console.print("Select by number or type full command:\n")
@@ -1263,6 +1328,7 @@ def print_help():
         ("browser",               "Launch Darkelf CLI Browser"),
         ("wipe",                  "Self-destruct and wipe sensitive files"),
         ("checkip",               "Verify you're routed through Tor"),
+        ("beacon <.onion>",       "Check if a .onion site is reachable via Tor"),
         ("help",                  "Show this help menu"),
         ("exit",                  "Exit the browser")
     ]
@@ -1539,7 +1605,141 @@ def interactive_prompt():
                 cursor += 1
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        
+class DarkelfUtils:
+    def __init__(self):
+        self.socks_proxy = "socks5h://127.0.0.1:9052"
 
+    def beacon_onion_service(self, onion_url):
+        if not onion_url.startswith("http"):
+            onion_url = "http://" + onion_url
+        try:
+            r = requests.get(
+                onion_url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                proxies={"http": self.socks_proxy, "https": self.socks_proxy},
+                timeout=15
+            )
+            if r.status_code < 400:
+                console.print(f"[🛰] Onion service is live: {onion_url} (Status {r.status_code})")
+            else:
+                console.print(f"[⚠] Onion responded with status {r.status_code}")
+        except Exception as e:
+            console.print(f"[🚫] Failed to reach onion service: {e}")
+            
+# TLS Certificate Fingerprint Helper
+
+def get_cert_hash(hostname: str, port: int = 443) -> Optional[str]:
+    try:
+        context = ssl.create_default_context()
+        with socket.create_connection((hostname, port), timeout=10) as sock:
+            with context.wrap_socket(sock, server_hostname=hostname) as ssock:
+                der_cert = ssock.getpeercert(binary_form=True)
+        return hashlib.sha256(der_cert).hexdigest()
+    except Exception as e:
+        print(f"[DarkelfAI] ❌ Error retrieving certificate for {hostname}: {e}")
+        return None
+        
+class DarkelfTLSMonitorJA3:
+    """
+    Monitors TLS certificate changes for a list of sites with rotating JA3 fingerprints and User-Agents.
+    Suitable for production use. Supports background operation and robust error handling.
+    """
+    def __init__(
+        self,
+        sites: List[str],
+        interval: int = 300,
+        proxy: Optional[str] = "socks5://127.0.0.1:9052"
+    ):
+        """
+        :param sites: List of hostnames to monitor (no scheme, e.g., "github.com")
+        :param interval: Time between checks (seconds)
+        :param proxy: Proxy URL (optional)
+        """
+        self.sites = sites
+        self.interval = interval
+        self.proxy = proxy
+        self.fingerprints: Dict[str, str] = {}
+        self.running = True
+
+        self.user_agents = [
+            "Mozilla/5.0 (Windows NT 10.0; rv:115.0) Gecko/20100101 Firefox/115.0",
+            "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:95.0) Gecko/20100101 Firefox/95.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 12.5; rv:92.0) Gecko/20100101 Firefox/92.0",
+            "Mozilla/5.0 (Windows NT 6.1; Win64; x64; rv:98.0) Gecko/20100101 Firefox/98.0",
+            "Mozilla/5.0 (X11; Linux x86_64; rv:78.0) Gecko/20100101 Firefox/78.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:102.0) Gecko/20100101 Firefox/102.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 11.2; rv:99.0) Gecko/20100101 Firefox/99.0"
+        ]
+        self.ja3_profiles = [
+            "firefox_92","firefox_95","firefox_98","firefox_102"
+        ]
+
+    def rotate_headers(self) -> Dict[str, str]:
+        """Randomly select HTTP headers for requests."""
+        return {"User-Agent": random.choice(self.user_agents)}
+
+    def rotate_ja3_session(self) -> tls_client.Session:
+        """Create a tls_client.Session with a randomly chosen JA3 (ClientHello) profile."""
+        return tls_client.Session(
+            client_identifier=random.choice(self.ja3_profiles)
+        )
+
+    async def check_cert(self, site: str, headers: Dict[str, str]):
+        """
+        Checks the TLS certificate for a given site, detects changes, and prints status.
+        """
+        try:
+            # 1. Rotate JA3 and fetch page for anti-bot (optional for your logic)
+            session = self.rotate_ja3_session()
+            session.get(
+                f"https://{site}",
+                headers=headers,
+                proxy=self.proxy,
+                timeout_seconds=15,
+                allow_redirects=True,
+            )
+            # 2. Independently fetch and hash the real cert using ssl
+            cert_hash = get_cert_hash(site)
+            if not cert_hash:
+                print(f"[DarkelfAI] ❌ Could not extract certificate for {site}")
+                return
+            if site not in self.fingerprints:
+                print(f"[DarkelfAI] 📌 Initial fingerprint for {site}: {cert_hash}")
+                self.fingerprints[site] = cert_hash
+            elif self.fingerprints[site] != cert_hash:
+                print(f"[DarkelfAI] ⚠️ TLS CERT ROTATION for {site}")
+                print(f"Old: {self.fingerprints[site]}")
+                print(f"New: {cert_hash}")
+                self.fingerprints[site] = cert_hash
+            else:
+                print(f"[DarkelfAI] ✅ No change in cert for {site}")
+        except Exception as e:
+            print(f"[DarkelfAI] ❌ Error checking {site}: {e}")
+
+    async def monitor_loop(self):
+        """Main monitoring loop. Runs until .stop() is called."""
+        while self.running:
+            headers = self.rotate_headers()
+            print(f"[DarkelfAI] 🔁 Rotating User-Agent: {headers['User-Agent']}")
+            tasks = [self.check_cert(site, headers) for site in self.sites]
+            await asyncio.gather(*tasks)
+            await asyncio.sleep(self.interval)
+
+    def start(self):
+        """Starts the monitor in a background thread."""
+        def runner():
+            print("[DarkelfAI] ✅ TLS Monitor started in background thread.")
+            asyncio.run(self.monitor_loop())
+        thread = threading.Thread(target=runner, daemon=True)
+        thread.start()
+        print("[DarkelfAI] ✅ TLS Monitor running in background thread.")
+
+    def stop(self):
+        """Stops the monitoring loop."""
+        self.running = False
+        print("[DarkelfAI] 🛑 TLS Monitor stopped.")
+    
 class SecureCleanup:
     @staticmethod
     def secure_delete(file_path):
@@ -1669,6 +1869,14 @@ class SecureCleanup:
                     pass
         except Exception:
             pass
+   
+def start_tls_monitor():
+    monitored_sites = [
+        "check.torproject.org",
+        "example.com"
+    ]
+    monitor = DarkelfTLSMonitorJA3(monitored_sites, interval=300)
+    monitor.start()  # Already runs in a background thread
 
 def repl_main():
     os.environ["HISTFILE"] = ""
@@ -1686,8 +1894,13 @@ def repl_main():
     phishing_detector = PhishingDetectorZeroTrace(pq_logger=pq_logger)
     tor_manager = TorManagerCLI()
     tor_manager.init_tor()
-    messenger = DarkelfMessenger()
+    
+    # Start TLS monitor after 20s delay to allow Tor to bootstrap
+    threading.Timer(20.0, start_tls_monitor).start()
 
+    messenger = DarkelfMessenger()
+    utils = DarkelfUtils()
+    
     console.print("🛡️  Darkelf CLI Browser - Stealth Mode - Auto Tor rotation, decoy traffic, onion discovery")
     print_help()
 
@@ -1718,9 +1931,27 @@ def repl_main():
             if not cmd:
                 continue
 
+            if cmd.isdigit():
+                index = int(cmd) - 1
+                if 0 <= index < len(TOOLS):
+                    tool_name = TOOLS[index]
+                    console.print(f"🛠️  Launching tool: {tool_name}")
+                    open_tool(tool_name)
+                    continue
+
+            if cmd.lower() in TOOLS:
+                console.print(f"🛠️  Launching tool: {cmd.lower()}")
+                open_tool(cmd.lower())
+                continue
+
             elif cmd == "checkip":
                 check_my_ip()
-
+                
+            # inside the REPL command checks
+            elif cmd.startswith("beacon "):
+                onion = cmd.split(" ", 1)[1]
+                utils.beacon_onion_service(onion)
+                
             elif cmd == "help":
                 print_help()
 
@@ -1805,7 +2036,6 @@ def repl_main():
 
     threading.Thread(target=tor_auto_renew_thread, daemon=True).start()
     threading.Thread(target=decoy_traffic_thread, args=(extra_stealth_options,), daemon=True).start()
-
 
 if __name__ == "__main__":
     cli_commands = {"generate-keys", "send", "receive"}
