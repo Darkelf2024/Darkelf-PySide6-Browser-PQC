@@ -66,6 +66,7 @@ import shutil
 import socket
 import json
 import secrets
+import tempfile
 import platform
 import shlex
 import struct
@@ -75,9 +76,15 @@ import tty
 import zlib
 import oqs
 import re
+from collections import deque
 from typing import Optional, List, Dict
 from datetime import datetime
 import psutil
+from rich.console import Console
+from rich.panel import Panel
+from rich.text import Text
+from rich.rule import Rule
+from rich.align import Align
 from urllib.parse import quote_plus, unquote, parse_qs, urlparse
 from bs4 import BeautifulSoup
 from oqs import KeyEncapsulation
@@ -87,16 +94,32 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import requests
 
-
-# --- Logging setup ---
-def setup_logging():
-    logging.getLogger('stem').disabled = True
-    setup_logging()
-    
 # --- Tor integration via Stem ---
 import stem.process
+from stem.connection import authenticate_cookie
 from stem.control import Controller
+from stem import Signal as StemSignal
 from stem import process as stem_process
+
+def setup_logging():
+    # Disable specific library loggers
+    logging.getLogger('stem').disabled = True
+    logging.getLogger('urllib3').disabled = True
+    logging.getLogger('requests').disabled = True
+    logging.getLogger('torpy').disabled = True
+    logging.getLogger('socks').disabled = True
+    logging.getLogger('httpx').disabled = True
+    logging.getLogger('aiohttp').disabled = True
+    logging.getLogger('asyncio').disabled = True
+
+    # Optional: shut down *all* logging unless explicitly re-enabled
+    logging.basicConfig(level=logging.CRITICAL)
+
+    # Bonus: catch any logs that somehow sneak through
+    logging.getLogger().addHandler(logging.NullHandler())
+
+# Call this early in your main script
+setup_logging()
 
 DUCKDUCKGO_LITE = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
 
@@ -149,13 +172,13 @@ class DarkelfKernelMonitor(threading.Thread):
 
     def run(self):
         self.monitor_active = True
-        print("[DarkelfKernelMonitor] ✅ Kernel monitor active.")
+        console.print("[DarkelfKernelMonitor] ✅ Kernel monitor active.")
         while True:
             time.sleep(self.check_interval)
             swap_now = self.swap_active()
             if swap_now != self._last_swap_active:
                 if swap_now:
-                    print("\u274c [DarkelfKernelMonitor] Swap is ACTIVE — marking cleanup required!")
+                    console.print("\u274c [DarkelfKernelMonitor] Swap is ACTIVE — marking cleanup required!")
                     self.kill_dynamic_pager()
                     self.cleanup_required = True
                 self._last_swap_active = swap_now
@@ -163,12 +186,12 @@ class DarkelfKernelMonitor(threading.Thread):
             pager_now = self.dynamic_pager_running()
             if pager_now != self._last_pager_state:
                 if pager_now:
-                    print("\u274c [DarkelfKernelMonitor] dynamic_pager is RUNNING")
+                    console.print("\u274c [DarkelfKernelMonitor] dynamic_pager is RUNNING")
                 self._last_pager_state = pager_now
 
             current_fingerprint = self.system_fingerprint()
             if hash(str(current_fingerprint)) != self._last_fingerprint_hash:
-                print("\u26a0\ufe0f [DarkelfKernelMonitor] Kernel config changed!")
+                console.print("\u26a0\ufe0f [DarkelfKernelMonitor] Kernel config changed!")
                 self.cleanup_required = True
                 self._last_fingerprint_hash = hash(str(current_fingerprint))
 
@@ -189,16 +212,16 @@ class DarkelfKernelMonitor(threading.Thread):
     def kill_dynamic_pager(self):
         try:
             subprocess.run(["sudo", "launchctl", "bootout", "system", "/System/Library/LaunchDaemons/com.apple.dynamic_pager.plist"], check=True)
-            print("\U0001f512 [DarkelfKernelMonitor] dynamic_pager disabled")
+            console.print("\U0001f512 [DarkelfKernelMonitor] dynamic_pager disabled")
         except subprocess.CalledProcessError:
-            print("\u26a0\ufe0f [DarkelfKernelMonitor] Failed to disable dynamic_pager")
+            console.print("\u26a0\ufe0f [DarkelfKernelMonitor] Failed to disable dynamic_pager")
 
     def secure_delete_swap(self):
         try:
             subprocess.run(["sudo", "rm", "-f", "/private/var/vm/swapfile*"], check=True)
-            print("\U0001f4a8 [DarkelfKernelMonitor] Swap files removed")
+            console.print("\U0001f4a8 [DarkelfKernelMonitor] Swap files removed")
         except Exception as e:
-            print(f"\u26a0\ufe0f [DarkelfKernelMonitor] Failed to remove swapfiles: {e}")
+            console.print(f"\u26a0\ufe0f [DarkelfKernelMonitor] Failed to remove swapfiles: {e}")
 
     def secure_purge_darkelf_vault(self):
         vault_paths = [
@@ -215,12 +238,12 @@ class DarkelfKernelMonitor(threading.Thread):
                         f.seek(0)
                         f.write(secrets.token_bytes(length))
                     os.remove(path)
-                    print(f"\U0001f4a5 [DarkelfKernelMonitor] Vault destroyed: {path}")
+                    console.print(f"\U0001f4a5 [DarkelfKernelMonitor] Vault destroyed: {path}")
                 except Exception as e:
-                    print(f"\u26a0\ufe0f Failed to delete {path}: {e}")
+                    console.print(f"\u26a0\ufe0f Failed to delete {path}: {e}")
 
     def shutdown_darkelf(self):
-        print("\U0001f4a3 [DarkelfKernelMonitor] Shutdown initiated.")
+        console.print("\U0001f4a3 [DarkelfKernelMonitor] Shutdown initiated.")
         if self.cleanup_required:
             self.secure_delete_swap()
             self.secure_purge_darkelf_vault()
@@ -288,7 +311,7 @@ class MemoryMonitor(threading.Thread):
         while self._running:
             mem = psutil.virtual_memory()
             if mem.available < self.threshold:
-                print(f"🔻 LOW MEMORY: < {self.threshold // (1024 * 1024)} MB available. Exiting to prevent swap.")
+                console.print(f"🔻 LOW MEMORY: < {self.threshold // (1024 * 1024)} MB available. Exiting to prevent swap.")
                 sys.exit(1)
             time.sleep(self.check_interval)
 
@@ -410,7 +433,7 @@ class StealthCovertOpsPQ:
                 pass
 
     def panic(self):
-        print("[StealthOpsPQ] 🚨 PANIC: Wiping memory, faking noise, and terminating.")
+        console.print("[StealthOpsPQ] 🚨 PANIC: Wiping memory, faking noise, and terminating.")
         self.clear_logs()
         self.memory_saturate(500)
         self.cpu_saturate(10)
@@ -505,9 +528,9 @@ class PhishingDetectorZeroTrace:
             try:
                 self.pq_logger.authorize_flush("darkelf-confirm")
                 self.pq_logger.flush_log(path=self.flush_path)
-                print(f"[PhishingDetector] ✅ Flushed encrypted phishing log to {self.flush_path}")
+                console.print(f"[PhishingDetector] ✅ Flushed encrypted phishing log to {self.flush_path}")
             except Exception as e:
-                print(f"[PhishingDetector] ⚠️ Log flush failed: {e}")
+                console.print(f"[PhishingDetector] ⚠️ Log flush failed: {e}")
 
 class PQKEMWrapper:
     def __init__(self, algo="Kyber768"):
@@ -653,6 +676,8 @@ class NetworkProtector:
                 pass
             time.sleep(self.secure_random.uniform(15, 45))  # Interval between cover messages
 
+console = Console()
+
 class TorManagerCLI:
     def __init__(self):
         self.tor_process = None
@@ -668,23 +693,23 @@ class TorManagerCLI:
         if self.tor_network_enabled:
             self.start_tor()
             if self.is_tor_running():
-                print(f"[Darkelf] Tor is running on SOCKS:{self.socks_port}, CONTROL:{self.control_port}, DNS:{self.dns_port}")
+                console.print(f"[Darkelf] Tor is running on SOCKS:{self.socks_port}, CONTROL:{self.control_port}, DNS:{self.dns_port}")
 
     def start_tor(self):
         try:
             if self.tor_process:
-                print("Tor is already running.")
+                console.print("Tor is already running.")
                 return
 
             tor_path = shutil.which("tor")
             obfs4_path = shutil.which("obfs4proxy")
 
             if not tor_path or not os.path.exists(tor_path):
-                print("Tor not found. Please install it using:\n\n  brew install tor\nor\n  sudo apt install tor")
+                console.print("Tor not found. Please install it using:\n\n  brew install tor\nor\n  sudo apt install tor")
                 return
 
             if not obfs4_path or not os.path.exists(obfs4_path):
-                print("obfs4proxy not found. Please install it using:\n\n  brew install obfs4proxy\nor\n  sudo apt install obfs4proxy")
+                console.print("obfs4proxy not found. Please install it using:\n\n  brew install obfs4proxy\nor\n  sudo apt install obfs4proxy")
                 return
 
             bridges = [
@@ -718,16 +743,16 @@ class TorManagerCLI:
                 self.tor_process = stem_process.launch_tor_with_config(
                     tor_cmd=tor_path,
                     config=tor_config,
-                    init_msg_handler=lambda line: print("[tor]", line)
+                    init_msg_handler=lambda line: console.print("[tor]", line)
                 )
             except Exception as bridge_error:
-                print("[Darkelf] Bridge connection failed:", bridge_error)
+                console.print("[Darkelf] Bridge connection failed:", bridge_error)
 
                 if not getattr(self, "allow_direct_fallback", True):
-                    print("Bridge connection failed and direct fallback is disabled.")
+                    console.print("Bridge connection failed and direct fallback is disabled.")
                     return  # Stop here if fallback not allowed
 
-                print("[Darkelf] Bridge connection failed. Trying direct Tor connection...")
+                console.print("[Darkelf] Bridge connection failed. Trying direct Tor connection...")
                 tor_config.pop('UseBridges', None)
                 tor_config.pop('ClientTransportPlugin', None)
                 tor_config.pop('Bridge', None)
@@ -736,7 +761,7 @@ class TorManagerCLI:
                 self.tor_process = stem_process.launch_tor_with_config(
                     tor_cmd=tor_path,
                     config=tor_config,
-                    init_msg_handler=lambda line: print("[tor fallback]", line)
+                    init_msg_handler=lambda line: console.print("[tor fallback]", line)
                 )
             
             # Wait for the control_auth_cookie to appear and be readable
@@ -748,12 +773,12 @@ class TorManagerCLI:
             with open(cookie_path, 'rb') as f:
                 cookie = f.read()
             self.controller.authenticate(cookie)
-            print("[Darkelf] Tor authenticated via cookie.")
+            console.print("[Darkelf] Tor authenticated via cookie.")
             
         except OSError as e:
-            print(f"Failed to start Tor: {e}")
+            console.print(f"Failed to start Tor: {e}")
         except Exception as e:
-            print(f"Unexpected error: {e}")
+            console.print(f"Unexpected error: {e}")
 
     def wait_for_cookie(self, cookie_path, timeout=10):
         start = time.time()
@@ -772,7 +797,7 @@ class TorManagerCLI:
                 controller.authenticate()
                 return True
         except Exception as e:
-            print(f"Tor is not running: {e}")
+            console.print(f"Tor is not running: {e}")
             return False
 
     def is_tor_running(self):
@@ -781,7 +806,7 @@ class TorManagerCLI:
                 controller.authenticate()
                 return True
         except Exception as e:
-            print(f"Tor is not running: {e}")
+            console.print(f"Tor is not running: {e}")
             return False
 
     def test_tor_socks_pqc(self):
@@ -807,14 +832,14 @@ class TorManagerCLI:
             test_sock.close()
 
         except Exception as e:
-            print(f"[Darkelf] Tor SOCKS PQC test failed: {e}")
+            console.print(f"[Darkelf] Tor SOCKS PQC test failed: {e}")
 
 
     def stop_tor(self):
         if self.tor_process:
             self.tor_process.terminate()
             self.tor_process = None
-            print("Tor stopped.")
+            console.print("Tor stopped.")
 
     def close(self):
         self.stop_tor()
@@ -851,12 +876,12 @@ def duckduckgo_search(query):
             debug_path = f"/tmp/ddg_debug_{query.replace(' ', '_')}.html"
             with open(debug_path, "w", encoding="utf-8") as f:
                 f.write(response.text)
-            print(f"[Darkelf] Parsing failed for '{query}'. Saved raw HTML to {debug_path}")
+            console.print(f"[Darkelf] Parsing failed for '{query}'. Saved raw HTML to {debug_path}")
 
         return results
 
     except Exception as e:
-        print(f"[Darkelf] DuckDuckGo search error for '{query}': {e}")
+        console.print(f"[Darkelf] DuckDuckGo search error for '{query}': {e}")
         return []
         
 def get_tor_proxy():
@@ -919,7 +944,7 @@ def get_fernet_key(path="logkey.bin"):
         key = f.read().strip()
 
     if not is_valid_fernet_key(key):
-        print("⚠️ Invalid key file detected. Regenerating secure Fernet key.")
+        console.print("⚠️ Invalid key file detected. Regenerating secure Fernet key.")
         key = Fernet.generate_key()
         with open(path, "wb") as f:
             f.write(key)
@@ -1018,13 +1043,15 @@ class DarkelfMessenger:
 
             key = base64.urlsafe_b64encode(shared_secret[:32])
             message = Fernet(key).decrypt(token)
-            print("📥 Message decrypted:", message.decode())
+            console.print("📥 Message decrypted:", message.decode())
             return 0
         except Exception as e:
             logging.error("Decryption failed: %s", e)
             return 1
 
-def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=True, method="GET", data=None):
+import requests
+
+def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=False, method="GET", data=None):
     proxies = {
         "http": get_tor_proxy(),
         "https": get_tor_proxy()
@@ -1042,17 +1069,20 @@ def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=Tru
         resp.raise_for_status()
         random_delay(extra_stealth_options)
         if debug:
-            print("\n[DEBUG] Request URL:", url)
-            print("[DEBUG] Request Headers:", headers)
-            print("[DEBUG] Response Status:", resp.status_code)
-            print("[DEBUG] Response Headers:", dict(resp.headers))
-            print("[DEBUG] Raw HTML preview:\n", resp.text[:2000], "\n[END DEBUG]\n")
+            console.print("\n[DEBUG] Request URL:", url)
+            console.print("[DEBUG] Request Headers:", headers)
+            console.print("[DEBUG] Response Status:", resp.status_code)
+            console.print("[DEBUG] Response Headers:", dict(resp.headers))
+            console.print("[DEBUG] Raw HTML preview:\n", resp.text[:2000], "\n[END DEBUG]\n")
         return resp.text, headers
+    except requests.exceptions.RequestException as e:
+        console.print(f"[red]Network error during fetch: {e}[/red]")
+        # Optionally, return a blank page or raise a custom error
+        return "<html><p>[Network error]</p></html>", headers
     except Exception as e:
-        if debug:
-            print(f"[DEBUG] Exception during fetch: {e}")
-        trigger_self_destruct(f"Fetch failed: {e}")
-
+        # Only wipe for actual intrusion, not for network errors!
+        trigger_self_destruct(f"Unexpected critical error: {e}")
+        
 def parse_ddg_lite_results(soup):
     results = []
     for a in soup.find_all("a", href=True):
@@ -1077,11 +1107,11 @@ def check_my_ip():
     try:
         html, _ = fetch_with_requests("http://check.torproject.org", debug=False)
         if "Congratulations. This browser is configured to use Tor." in html:
-            print("✅ You're using Tor correctly. Traffic is routed via Tor.")
+            console.print("✅ You're using Tor correctly. Traffic is routed via Tor.")
         else:
-            print("❌ Warning: Tor routing not detected by check.torproject.org.")
+            console.print("❌ Warning: Tor routing not detected by check.torproject.org.")
     except Exception as e:
-        print(f"⚠️ Failed to verify Tor status: {e}")
+        console.print(f"⚠️ Failed to verify Tor status: {e}")
 
 def fetch_and_display(url, session=None, extra_stealth_options=None, debug=True):
     html, headers = fetch_with_requests(
@@ -1091,7 +1121,7 @@ def fetch_and_display(url, session=None, extra_stealth_options=None, debug=True)
         debug=debug
     )
     soup = BeautifulSoup(html, "html.parser")
-    print("\n📄 Title:", soup.title.string.strip() if soup.title else "No title")
+    console.print("\n📄 Title:", soup.title.string.strip() if soup.title else "No title")
     is_ddg_search = "duckduckgo" in url and ("q=" in url or "search" in url)
     results = []
     if is_ddg_search:
@@ -1110,23 +1140,23 @@ def fetch_and_display(url, session=None, extra_stealth_options=None, debug=True)
             soup2 = BeautifulSoup(resp2, "html.parser")
             results = parse_ddg_lite_results(soup2)
         if results == "no_results":
-            print("  ▪ DuckDuckGo Lite reports no results for this query.")
+            console.print("  ▪ DuckDuckGo Lite reports no results for this query.")
         elif results:
             for txt, link in results:
-                print(f"  ▪ {txt} — {link if link else '[no url]'}")
+                console.print(f"  ▪ {txt} — {link if link else '[no url]'}")
         else:
-            print("  ▪ No results found or parsing failed.")
+            console.print("  ▪ No results found or parsing failed.")
             if debug:
-                print(html)
+                console.print(html)
     else:
         found = False
         for p in soup.find_all("p"):
             text = p.get_text(strip=True)
             if text:
-                print("  ▪", text)
+                console.print("  ▪", text)
                 found = True
         if not found:
-            print("  ▪ No results found or parsing failed.")
+            console.print("  ▪ No results found or parsing failed.")
     key = get_fernet_key()
     logmsg = f"{hash_url(url)} | {headers.get('User-Agent','?')}\n"
     enc_log = encrypt_log(logmsg, key)
@@ -1134,7 +1164,7 @@ def fetch_and_display(url, session=None, extra_stealth_options=None, debug=True)
         log.write(enc_log + b'\n')
 
 def trigger_self_destruct(reason="Unknown"):
-    print(f"💀 INTRUSION DETECTED: {reason} → WIPING...")
+    console.print(f"💀 INTRUSION DETECTED: {reason} → WIPING...")
     for f in KEY_FILES:
         if os.path.exists(f):
             with open(f, "ba+") as wipe:
@@ -1193,15 +1223,15 @@ def paginate_output(text):
 
         os.system('clear')
         for line in lines[i:i + page_size]:
-            print(line[:width])  # truncate long lines
+            console.print(line[:width])  # truncate long lines
 
         i += page_size
         if i < len(lines):
-            input("\n-- More -- Press Enter to continue...")
+            console.print("[bold green]>>[/bold green] ", end=""); input("\n-- More -- Press Enter to continue...")
             
 def onion_discovery(keywords, extra_stealth_options=None):
     ahmia = "http://juhanurmihxlp77nkq76byazcldy2hlmovfu2epvl5ankdibsot4csyd.onion/search/?q=" + quote_plus(keywords)
-    print(f"🌐 Discovering .onion services for: {keywords}")
+    console.print(f"🌐 Discovering .onion services for: {keywords}")
     try:
         html, _ = fetch_with_requests(ahmia, extra_stealth_options=extra_stealth_options, debug=True)
         soup = BeautifulSoup(html, "html.parser")
@@ -1209,32 +1239,37 @@ def onion_discovery(keywords, extra_stealth_options=None):
         for a in soup.find_all("a", href=True):
             href = a['href']
             if ".onion" in href and href not in seen:
-                print("  ▪", href)
+                console.print("  ▪", href)
                 seen.add(href)
         if not seen:
-            print("  ▪ No .onion services found for this query.")
+            console.print("  ▪ No .onion services found for this query.")
     except Exception as e:
-        print("  ▪ Error during onion discovery:", e)
+        console.print("  ▪ Error during onion discovery:", e)
 
 def print_help():
-    print(
-        "Commands:\n"
-        "  search <keywords>      — Search DuckDuckGo (onion)\n"
-        "  duck                   — Open DuckDuckGo homepage (onion)\n"
-        "  debug <keywords>       — Search and show full debug info\n"
-        "  stealth                — Toggle extra stealth options\n"
-        "  genkeys                — Generate post-quantum keys\n"
-        "  sendmsg                — Encrypt & send a message\n"
-        "  recvmsg                — Decrypt & show received message\n"
-        "  tornew                 — Request new Tor circuit (if supported)\n"
-        "  findonions <keywords>  — Discover .onion services by keywords\n"
-        "  browser                - Launch Darkelf CLI Browser\n"
-        "  wipe                   — Self-destruct and wipe sensitive files\n"
-        "  checkip                — Verify you're routed through Tor\n"
-        "  help                   — Show this help\n"
-        "  exit                   — Exit browser\n"
-    )
+    console.print("Darkelf CLI Browser — Command Reference\n")
+    console.print("Select by number or type full command:\n")
 
+    commands = [
+        ("search <keywords>",     "Search DuckDuckGo (onion)"),
+        ("duck",                  "Open DuckDuckGo homepage (onion)"),
+        ("debug <keywords>",      "Search and show full debug info"),
+        ("stealth",               "Toggle extra stealth options"),
+        ("genkeys",               "Generate post-quantum keys"),
+        ("sendmsg",               "Encrypt & send a message"),
+        ("recvmsg",               "Decrypt & show received message"),
+        ("tornew",                "Request new Tor circuit (if supported)"),
+        ("findonions <keywords>", "Discover .onion services by keywords"),
+        ("browser",               "Launch Darkelf CLI Browser"),
+        ("wipe",                  "Self-destruct and wipe sensitive files"),
+        ("checkip",               "Verify you're routed through Tor"),
+        ("help",                  "Show this help menu"),
+        ("exit",                  "Exit the browser")
+    ]
+
+    for idx, (cmd, desc) in enumerate(commands, start=1):
+        console.print(f"  {idx:>2}. {cmd:<24} — {desc}")
+        
 def cli_main():
     setup_logging()
     parser = argparse.ArgumentParser(description="DarkelfMessenger: PQC CLI Messenger")
@@ -1270,6 +1305,8 @@ def get_key():
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
+console = Console()
+
 class Page:
     def __init__(self, url):
         self.url = url
@@ -1283,20 +1320,49 @@ class Page:
             html, _ = fetch_with_requests(self.url, debug=False)
             soup = BeautifulSoup(html, 'html.parser')
 
-            for s in soup(['script', 'style']):
+            # Remove scripts/styles/noscript
+            for s in soup(['script', 'style', 'noscript']):
                 s.decompose()
 
-            text = soup.get_text(separator='\n')
+            main_content = None
+            # Special case: Wikipedia homepage (central-featured) or article (mw-parser-output)
+            if "wikipedia.org" in self.url:
+                main = soup.find("div", class_="central-featured")
+                if main:
+                    main_content = main.get_text(separator='\n')
+                else:
+                    main = soup.find("div", class_="mw-parser-output")
+                    if main:
+                        main_content = main.get_text(separator='\n')
+            # Fallback: all <p> tags
+            if not main_content:
+                ps = soup.find_all("p")
+                if ps:
+                    main_content = "\n".join(p.get_text(strip=True) for p in ps if p.get_text(strip=True))
+            # Fallback: all visible text
+            if not main_content or not main_content.strip():
+                main_content = soup.get_text(separator='\n')
+
+            # Clean up lines: remove empties/whitespace only
+            self.lines = [l.strip() for l in main_content.splitlines() if l.strip()]
+            if not self.lines:
+                self.lines = ["[dim]No content available.[/dim]"]
+
+            # Extract links as before
             self.links = [
                 (i + 1, a.get_text(strip=True), a.get('href'))
                 for i, a in enumerate(soup.find_all('a'))
             ]
 
+            # Annotate first occurrence of link text in the output
             for i, (num, label, _) in enumerate(self.links):
-                label = label or "Unnamed link"
-                text = text.replace(label, f"[{num}] {label}", 1)
+                if label:
+                    annotated = f"[{num}] {label}"
+                    for idx, line in enumerate(self.lines):
+                        if label in line:
+                            self.lines[idx] = line.replace(label, annotated, 1)
+                            break
 
-            self.lines = [l.strip() for l in text.splitlines() if l.strip()]
         except Exception as e:
             self.error = str(e)
 
@@ -1306,29 +1372,75 @@ class DarkelfCLIBrowser:
         self.forward_stack = []
         self.current_page = None
         self.scroll = 0
-        self.height = 20
+
+        term_height = shutil.get_terminal_size((80, 24)).lines
+        # Leave 8 lines for header/footer
+        self.height = max(12, term_height - 2)
 
     def clear(self):
         os.system('clear' if os.name == 'posix' else 'cls')
 
     def render(self):
         self.clear()
+
         if not self.current_page:
-            print("No page loaded.")
+            console.print(Panel("[blue]No page loaded.[/blue]", title="Darkelf CLI Browser", border_style="blue"))
             return
-        print(f"\033[1mDarkelf CLI Browser – {self.current_page.url}\033[0m")
-        print("-" * 60)
+
+        # Header
+        url_display = self.current_page.url
+        if len(url_display) > 100:
+            url_display = url_display[:96] + "..."
+
+        header = Panel(
+            f"[bold cyan]Darkelf CLI Browser[/bold cyan]\n[blue underline]{url_display}[/blue underline]",
+            border_style="cyan",
+            padding=(1, 2),
+            expand=True
+        )
+        console.print(header)
+
+        # Error panel
         if self.current_page.error:
-            print(f"[!] Error: {self.current_page.error}")
+            console.print(Panel(f"[red]Error: {self.current_page.error}[/blue]", title="Page Error", border_style="blue"))
             return
-        for i in range(self.scroll, min(self.scroll + self.height, len(self.current_page.lines))):
-            print(self.current_page.lines[i][:80])
-        print("-" * 60)
-        print("[↑/↓]: Scroll  |  [o #]: Open Link  |  u: URL  |  b: Back  |  q: Quit")
+
+        # Page content
+        visible_lines = self.current_page.lines[self.scroll:self.scroll + self.height]
+        if visible_lines:
+            page_text = "\n".join(visible_lines)
+            content = Text(page_text, style="white")
+        else:
+            content = Text("[dim]No content available.[/dim]", style="dim")
+
+        console.print(Panel(content, title="📰 Page Content", border_style="white", expand=True))
+
+        # End-of-article marker
+        end_index = min(self.scroll + self.height, len(self.current_page.lines))
+        if end_index >= len(self.current_page.lines):
+            console.print("[dim]-- End of article --[/dim]")
+
+        # Footer
+        footer = Text()
+        footer.append("↑/↓", style="bold blue")
+        footer.append(": Scroll  |  ")
+        footer.append("o", style="bold blue")
+        footer.append(": Open Link  |  ")
+        footer.append("u", style="bold blue")
+        footer.append(": URL  |  ")
+        footer.append("b", style="bold blue")
+        footer.append(": Back  |  ")
+        footer.append("q", style="bold blue")
+        footer.append(": Quit")
+
+        console.print(Rule(style="grey37"))
+        console.print(Align.center(footer))
+    
 
     def visit(self, url):
         if self.current_page:
             self.history.append(self.current_page.url)
+
         self.scroll = 0
         self.forward_stack.clear()
         self.current_page = Page(url)
@@ -1344,7 +1456,7 @@ class DarkelfCLIBrowser:
                 self.visit(link)
         except:
             pass
-
+            
     def run(self):
         self.visit("https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite")
         while True:
@@ -1360,9 +1472,13 @@ class DarkelfCLIBrowser:
                     self.scroll += 1
                     self.render()
             elif key == 'u':
-                print("\nEnter URL: ", end="")
+                console.print("\nEnter URL: ", end="")
+                console.print("[bold green]>>[/bold green] ", end="")
                 url = input().strip()
-                if not url.startswith("http"):
+                if not url:
+                    console.print("[red]No URL entered. Cancelling.[/blue]")
+                    return
+                if not url.startswith(("http://", "https://")):
                     url = "https://" + url
                 self.visit(url)
             elif key == 'b':
@@ -1372,12 +1488,187 @@ class DarkelfCLIBrowser:
                     self.visit(url)
             elif key == 'o':
                 try:
-                    print("\nLink number to open: ", end="")
-                    num = int(input())
+                    console.print("[bold green]>>[/bold green] ", end="")
+                    user_input = input()
+                    num = int(user_input)
                     self.open_link(num)
                 except:
                     pass
-            self.render()
+
+def interactive_prompt():
+
+    buffer = []
+    history = deque([], maxlen=100)
+    cursor = 0
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        console.print("[bold green]>>[/bold green] ", end="", soft_wrap=True)
+        sys.stdout.flush()
+
+        while True:
+            key = sys.stdin.read(1)
+            if key == '\x1b':
+                key += sys.stdin.read(2)
+
+            if key == '\r':  # Enter
+                print()
+                cmd = ''.join(buffer)
+                history.append(cmd)
+                return cmd
+
+            elif key == '\x7f':  # Backspace
+                if buffer:
+                    buffer.pop()
+                    cursor -= 1
+                    print('\b \b', end='', flush=True)
+
+            elif key == '\x1b[A':  # Up (history stub)
+                pass
+            elif key == '\x1b[B':  # Down
+                pass
+            elif key == '\x1b[C':  # Right
+                pass
+            elif key == '\x1b[D':  # Left
+                pass
+            else:
+                buffer.append(key)
+                print(key, end='', flush=True)
+                cursor += 1
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+class SecureCleanup:
+    @staticmethod
+    def secure_delete(file_path):
+        try:
+            if not os.path.exists(file_path):
+                return
+            size = os.path.getsize(file_path)
+            with open(file_path, "r+b", buffering=0) as f:
+                for _ in range(3):
+                    f.seek(0)
+                    f.write(secrets.token_bytes(size))
+                    f.flush()
+                    os.fsync(f.fileno())
+            os.remove(file_path)
+        except Exception:
+            pass
+
+    @staticmethod
+    def secure_delete_directory(directory_path):
+        try:
+            if not os.path.exists(directory_path):
+                return
+            for root, dirs, files in os.walk(directory_path, topdown=False):
+                for name in files:
+                    SecureCleanup.secure_delete(os.path.join(root, name))
+                for name in dirs:
+                    try:
+                        os.rmdir(os.path.join(root, name))
+                    except Exception:
+                        pass
+            os.rmdir(directory_path)
+        except Exception:
+            pass
+
+    @staticmethod
+    def secure_delete_temp_memory_file(file_path):
+        try:
+            if not isinstance(file_path, (str, bytes, os.PathLike)) or not os.path.exists(file_path):
+                return
+            file_size = os.path.getsize(file_path)
+            with open(file_path, "r+b", buffering=0) as f:
+                for _ in range(3):
+                    f.seek(0)
+                    f.write(secrets.token_bytes(file_size))
+                    f.flush()
+                    os.fsync(f.fileno())
+            os.remove(file_path)
+        except Exception:
+            pass
+
+    @staticmethod
+    def secure_delete_ram_disk_directory(ram_dir_path):
+        try:
+            if not os.path.exists(ram_dir_path):
+                return
+            for root, dirs, files in os.walk(ram_dir_path, topdown=False):
+                for name in files:
+                    SecureCleanup.secure_delete_temp_memory_file(os.path.join(root, name))
+                for name in dirs:
+                    try:
+                        os.rmdir(os.path.join(root, name))
+                    except Exception:
+                        pass
+            os.rmdir(ram_dir_path)
+        except Exception:
+            pass
+
+    @staticmethod
+    def shutdown_cleanup(context):
+        try:
+            log_path = context.get("log_path")
+            stealth_log_path = os.path.expanduser("~/.darkelf_log")
+            ram_path = context.get("ram_path")
+            tor_manager = context.get("tor_manager")
+            encrypted_store = context.get("encrypted_store")
+            kyber_manager = context.get("kyber_manager")
+
+            if log_path:
+                if os.path.isfile(log_path):
+                    SecureCleanup.secure_delete(log_path)
+                elif os.path.isdir(log_path):
+                    SecureCleanup.secure_delete_directory(log_path)
+
+            if os.path.exists(stealth_log_path):
+                try:
+                    with open(stealth_log_path, "r+b", buffering=0) as f:
+                        length = os.path.getsize(stealth_log_path)
+                        for _ in range(5):
+                            f.seek(0)
+                            f.write(secrets.token_bytes(length))
+                            f.flush()
+                            os.fsync(f.fileno())
+                    os.remove(stealth_log_path)
+                except Exception:
+                    pass
+
+            if tor_manager and callable(getattr(tor_manager, 'stop_tor', None)):
+                tor_manager.stop_tor()
+
+            if encrypted_store:
+                encrypted_store.wipe_memory()
+
+            if ram_path and os.path.exists(ram_path):
+                SecureCleanup.secure_delete_ram_disk_directory(ram_path)
+
+            temp_subdir = os.path.join(tempfile.gettempdir(), "darkelf_temp")
+            if os.path.exists(temp_subdir):
+                SecureCleanup.secure_delete_directory(temp_subdir)
+
+            for keyfile in ["private_key.pem", "ecdh_private_key.pem"]:
+                if os.path.exists(keyfile):
+                    SecureCleanup.secure_delete(keyfile)
+
+            if kyber_manager:
+                try:
+                    for attr in ['kyber_private_key', 'kyber_public_key']:
+                        key = getattr(kyber_manager, attr, None)
+                        if isinstance(key, bytearray):
+                            for i in range(len(key)):
+                                key[i] = 0
+                        setattr(kyber_manager, attr, None)
+                    kyber_manager.kem = None
+                    for kyber_file in ["kyber_private.key", "kyber_public.key"]:
+                        if os.path.exists(kyber_file):
+                            SecureCleanup.secure_delete(kyber_file)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 def repl_main():
     os.environ["HISTFILE"] = ""
@@ -1385,6 +1676,7 @@ def repl_main():
         open(os.path.expanduser("~/.bash_history"), "w").close()
     except:
         pass
+
     intrusion_check()
     kernel_monitor = DarkelfKernelMonitor()
     kernel_monitor.start()
@@ -1395,8 +1687,10 @@ def repl_main():
     tor_manager = TorManagerCLI()
     tor_manager.init_tor()
     messenger = DarkelfMessenger()
-    print("🛡️  Darkelf CLI Browser - Stealth Mode - Auto Tor rotation, decoy traffic, onion discovery")
+
+    console.print("🛡️  Darkelf CLI Browser - Stealth Mode - Auto Tor rotation, decoy traffic, onion discovery")
     print_help()
+
     extra_stealth_options = {
         "random_order": True,
         "add_noise_headers": True,
@@ -1405,78 +1699,126 @@ def repl_main():
         "session_isolation": True,
         "delay_range": (1.5, 3.0)
     }
+
     def find_file(filename):
         for path in [os.path.expanduser("~/Desktop"), os.path.expanduser("~"), "."]:
             full = os.path.join(path, filename)
             if os.path.exists(full):
                 return full
-        return filename  # fallback
+        return filename
 
     stealth_on = True
     threading.Thread(target=tor_auto_renew_thread, daemon=True).start()
     threading.Thread(target=decoy_traffic_thread, args=(extra_stealth_options,), daemon=True).start()
+
     while True:
         try:
+            console.print("[bold green]>>[/bold green] ", end="")
             cmd = input("darkelf> ").strip()
             if not cmd:
                 continue
+
+            if cmd.isdigit():
+                index = int(cmd) - 1
+                if 0 <= index < len(TOOLS):
+                    tool_name = TOOLS[index]
+                    console.print(f"🛠️  Launching tool: {tool_name}")
+                    open_tool(tool_name)
+                    continue
+
+            if cmd.lower() in TOOLS:
+                console.print(f"🛠️  Launching tool: {cmd.lower()}")
+                open_tool(cmd.lower())
+                continue
+
             elif cmd == "checkip":
                 check_my_ip()
+
             elif cmd == "help":
                 print_help()
+
             elif cmd == "browser":
                 DarkelfCLIBrowser().run()
+
             elif cmd == "stealth":
                 stealth_on = not stealth_on
-                print("🫥 Extra stealth options are now", "ENABLED" if stealth_on else "DISABLED")
+                console.print("🫥 Extra stealth options are now", "ENABLED" if stealth_on else "DISABLED")
+
             elif cmd.startswith("search "):
                 q = cmd.split(" ", 1)[1]
                 url = f"{DUCKDUCKGO_LITE}?q={quote_plus(q)}"
                 suspicious, reason = phishing_detector.is_suspicious_url(url)
                 if suspicious:
-                    print(f"⚠️ [PHISHING WARNING] {reason}")
+                    console.print(f"⚠️ [PHISHING WARNING] {reason}")
                 fetch_and_display(url, extra_stealth_options=extra_stealth_options if stealth_on else {}, debug=False)
+
             elif cmd.startswith("debug "):
                 q = cmd.split(" ", 1)[1]
                 url = f"{DUCKDUCKGO_LITE}?q={quote_plus(q)}"
                 suspicious, reason = phishing_detector.is_suspicious_url(url)
                 if suspicious:
-                    print(f"⚠️ [PHISHING WARNING] {reason}")
+                    console.print(f"⚠️ [PHISHING WARNING] {reason}")
                 fetch_and_display(url, extra_stealth_options=extra_stealth_options if stealth_on else {}, debug=True)
+
             elif cmd == "duck":
                 fetch_and_display(DUCKDUCKGO_LITE, extra_stealth_options=extra_stealth_options if stealth_on else {}, debug=False)
+
             elif cmd == "genkeys":
                 messenger.generate_keys()
+
             elif cmd == "sendmsg":
                 to = input("Recipient pubkey path: ")
                 msg = input("Message: ")
                 messenger.send_message(to, msg)
+
             elif cmd == "recvmsg":
                 priv = find_file("my_privkey.bin")
                 msgf = find_file("msg.dat")
-                print(f"🔐 Using private key: {priv}")
-                print(f"📩 Reading message from: {msgf}")
+                console.print(f"🔐 Using private key: {priv}")
+                console.print(f"📩 Reading message from: {msgf}")
                 messenger.receive_message(priv, msgf)
+
             elif cmd == "tornew":
                 renew_tor_circuit()
+
             elif cmd.startswith("findonions "):
                 keywords = cmd.split(" ", 1)[1]
                 onion_discovery(keywords, extra_stealth_options=extra_stealth_options if stealth_on else {})
+
             elif cmd == "wipe":
                 pq_logger.panic()
                 trigger_self_destruct("Manual wipe")
+
             elif cmd == "exit":
-                print("🧩 Exiting securely.")
+                console.print("🧩 Exiting securely.")
                 phishing_detector.flush_logs_on_exit()
+                SecureCleanup.shutdown_cleanup({
+                    "log_path": "log.enc",
+                    "tor_manager": tor_manager,
+                    "ram_path": None,
+                    "encrypted_store": None,
+                    "kyber_manager": None
+                })
                 break
+
             else:
-                print("❓ Unknown command. Type `help` for options.")
+                console.print("❓ Unknown command. Type `help` for options.")
+
         except KeyboardInterrupt:
-            print("\n⛔ Ctrl+C - exit requested.")
+            console.print("\n⛔ Ctrl+C - exit requested.")
             phishing_detector.flush_logs_on_exit()
+            SecureCleanup.shutdown_cleanup({
+                "log_path": "log.enc",
+                "tor_manager": tor_manager,
+                "ram_path": None,
+                "encrypted_store": None,
+                "kyber_manager": None
+            })
             break
+
     threading.Thread(target=tor_auto_renew_thread, daemon=True).start()
     threading.Thread(target=decoy_traffic_thread, args=(extra_stealth_options,), daemon=True).start()
+
 
 if __name__ == "__main__":
     cli_commands = {"generate-keys", "send", "receive"}
