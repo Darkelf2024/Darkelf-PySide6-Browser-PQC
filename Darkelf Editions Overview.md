@@ -56,7 +56,7 @@
 
 - **Use Case:** TraceLabs, OSINT Reconnaissance & CTF Operations  
 - **Description:**  
-  Enhanced Vault Edition with integrated OSINT tools and plugins specific to CTF-style investigations. Designed for competitive analysts and red team operators.
+  Enhanced Vault Edition with integrated OSINT tools specific to CTF-style investigations. Designed for competitive analysts and red team operators.
 - **Ideal For:**  
   - TraceLabs CTF competitors  
   - OSINT investigators  
