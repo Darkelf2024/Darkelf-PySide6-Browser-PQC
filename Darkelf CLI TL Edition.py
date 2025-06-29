@@ -66,6 +66,7 @@ import shutil
 import socket
 import json
 import secrets
+import tempfile
 import platform
 import shlex
 import struct
@@ -93,6 +94,12 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import requests
 
+# --- Tor integration via Stem ---
+import stem.process
+from stem.connection import authenticate_cookie
+from stem.control import Controller
+from stem import Signal as StemSignal
+from stem import process as stem_process
 
 def setup_logging():
     # Disable specific library loggers
@@ -113,11 +120,6 @@ def setup_logging():
 
 # Call this early in your main script
 setup_logging()
-
-# --- Tor integration via Stem ---
-import stem.process
-from stem.control import Controller
-from stem import process as stem_process
 
 DUCKDUCKGO_LITE = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
 
@@ -1645,13 +1647,144 @@ def interactive_prompt():
                 cursor += 1
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        
+class SecureCleanup:
+    @staticmethod
+    def secure_delete(file_path):
+        try:
+            if not os.path.exists(file_path):
+                return
+            size = os.path.getsize(file_path)
+            with open(file_path, "r+b", buffering=0) as f:
+                for _ in range(3):
+                    f.seek(0)
+                    f.write(secrets.token_bytes(size))
+                    f.flush()
+                    os.fsync(f.fileno())
+            os.remove(file_path)
+        except Exception:
+            pass
 
+    @staticmethod
+    def secure_delete_directory(directory_path):
+        try:
+            if not os.path.exists(directory_path):
+                return
+            for root, dirs, files in os.walk(directory_path, topdown=False):
+                for name in files:
+                    SecureCleanup.secure_delete(os.path.join(root, name))
+                for name in dirs:
+                    try:
+                        os.rmdir(os.path.join(root, name))
+                    except Exception:
+                        pass
+            os.rmdir(directory_path)
+        except Exception:
+            pass
+
+    @staticmethod
+    def secure_delete_temp_memory_file(file_path):
+        try:
+            if not isinstance(file_path, (str, bytes, os.PathLike)) or not os.path.exists(file_path):
+                return
+            file_size = os.path.getsize(file_path)
+            with open(file_path, "r+b", buffering=0) as f:
+                for _ in range(3):
+                    f.seek(0)
+                    f.write(secrets.token_bytes(file_size))
+                    f.flush()
+                    os.fsync(f.fileno())
+            os.remove(file_path)
+        except Exception:
+            pass
+
+    @staticmethod
+    def secure_delete_ram_disk_directory(ram_dir_path):
+        try:
+            if not os.path.exists(ram_dir_path):
+                return
+            for root, dirs, files in os.walk(ram_dir_path, topdown=False):
+                for name in files:
+                    SecureCleanup.secure_delete_temp_memory_file(os.path.join(root, name))
+                for name in dirs:
+                    try:
+                        os.rmdir(os.path.join(root, name))
+                    except Exception:
+                        pass
+            os.rmdir(ram_dir_path)
+        except Exception:
+            pass
+
+    @staticmethod
+    def shutdown_cleanup(context):
+        try:
+            log_path = context.get("log_path")
+            stealth_log_path = os.path.expanduser("~/.darkelf_log")
+            ram_path = context.get("ram_path")
+            tor_manager = context.get("tor_manager")
+            encrypted_store = context.get("encrypted_store")
+            kyber_manager = context.get("kyber_manager")
+
+            if log_path:
+                if os.path.isfile(log_path):
+                    SecureCleanup.secure_delete(log_path)
+                elif os.path.isdir(log_path):
+                    SecureCleanup.secure_delete_directory(log_path)
+
+            if os.path.exists(stealth_log_path):
+                try:
+                    with open(stealth_log_path, "r+b", buffering=0) as f:
+                        length = os.path.getsize(stealth_log_path)
+                        for _ in range(5):
+                            f.seek(0)
+                            f.write(secrets.token_bytes(length))
+                            f.flush()
+                            os.fsync(f.fileno())
+                    os.remove(stealth_log_path)
+                except Exception:
+                    pass
+
+            if tor_manager and callable(getattr(tor_manager, 'stop_tor', None)):
+                tor_manager.stop_tor()
+
+            if encrypted_store:
+                encrypted_store.wipe_memory()
+
+            if ram_path and os.path.exists(ram_path):
+                SecureCleanup.secure_delete_ram_disk_directory(ram_path)
+
+            temp_subdir = os.path.join(tempfile.gettempdir(), "darkelf_temp")
+            if os.path.exists(temp_subdir):
+                SecureCleanup.secure_delete_directory(temp_subdir)
+
+            for keyfile in ["private_key.pem", "ecdh_private_key.pem"]:
+                if os.path.exists(keyfile):
+                    SecureCleanup.secure_delete(keyfile)
+
+            if kyber_manager:
+                try:
+                    for attr in ['kyber_private_key', 'kyber_public_key']:
+                        key = getattr(kyber_manager, attr, None)
+                        if isinstance(key, bytearray):
+                            for i in range(len(key)):
+                                key[i] = 0
+                        setattr(kyber_manager, attr, None)
+                    kyber_manager.kem = None
+                    for kyber_file in ["kyber_private.key", "kyber_public.key"]:
+                        if os.path.exists(kyber_file):
+                            SecureCleanup.secure_delete(kyber_file)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+            
 def repl_main():
     os.environ["HISTFILE"] = ""
     try:
         open(os.path.expanduser("~/.bash_history"), "w").close()
     except:
         pass
+
     intrusion_check()
     kernel_monitor = DarkelfKernelMonitor()
     kernel_monitor.start()
@@ -1662,8 +1795,10 @@ def repl_main():
     tor_manager = TorManagerCLI()
     tor_manager.init_tor()
     messenger = DarkelfMessenger()
+
     console.print("🛡️  Darkelf CLI Browser - Stealth Mode - Auto Tor rotation, decoy traffic, onion discovery")
     print_help()
+
     extra_stealth_options = {
         "random_order": True,
         "add_noise_headers": True,
@@ -1672,23 +1807,25 @@ def repl_main():
         "session_isolation": True,
         "delay_range": (1.5, 3.0)
     }
+
     def find_file(filename):
         for path in [os.path.expanduser("~/Desktop"), os.path.expanduser("~"), "."]:
             full = os.path.join(path, filename)
             if os.path.exists(full):
                 return full
-        return filename  # fallback
+        return filename
 
     stealth_on = True
     threading.Thread(target=tor_auto_renew_thread, daemon=True).start()
     threading.Thread(target=decoy_traffic_thread, args=(extra_stealth_options,), daemon=True).start()
+
     while True:
         try:
             console.print("[bold green]>>[/bold green] ", end="")
             cmd = input("darkelf> ").strip()
             if not cmd:
                 continue
-            # Launch tool by number (1–18)
+
             if cmd.isdigit():
                 index = int(cmd) - 1
                 if 0 <= index < len(TOOLS):
@@ -1696,27 +1833,35 @@ def repl_main():
                     console.print(f"🛠️  Launching tool: {tool_name}")
                     open_tool(tool_name)
                     continue
-            # Launch tool by exact name
+
             if cmd.lower() in TOOLS:
                 console.print(f"🛠️  Launching tool: {cmd.lower()}")
                 open_tool(cmd.lower())
                 continue
+
             elif cmd == "checkip":
                 check_my_ip()
+
             elif cmd == "help":
                 print_help()
+
             elif cmd == "tools":
                 print_tools_help()
+
             elif cmd.startswith("tool "):
                 tool_name = cmd.split(" ", 1)[1]
                 open_tool(tool_name)
+
             elif cmd == "toolinfo":
                 print_toolinfo()
+
             elif cmd == "browser":
                 DarkelfCLIBrowser().run()
+
             elif cmd == "stealth":
                 stealth_on = not stealth_on
                 console.print("🫥 Extra stealth options are now", "ENABLED" if stealth_on else "DISABLED")
+
             elif cmd.startswith("search "):
                 q = cmd.split(" ", 1)[1]
                 url = f"{DUCKDUCKGO_LITE}?q={quote_plus(q)}"
@@ -1724,6 +1869,7 @@ def repl_main():
                 if suspicious:
                     console.print(f"⚠️ [PHISHING WARNING] {reason}")
                 fetch_and_display(url, extra_stealth_options=extra_stealth_options if stealth_on else {}, debug=False)
+
             elif cmd.startswith("debug "):
                 q = cmd.split(" ", 1)[1]
                 url = f"{DUCKDUCKGO_LITE}?q={quote_plus(q)}"
@@ -1731,38 +1877,63 @@ def repl_main():
                 if suspicious:
                     console.print(f"⚠️ [PHISHING WARNING] {reason}")
                 fetch_and_display(url, extra_stealth_options=extra_stealth_options if stealth_on else {}, debug=True)
+
             elif cmd == "duck":
                 fetch_and_display(DUCKDUCKGO_LITE, extra_stealth_options=extra_stealth_options if stealth_on else {}, debug=False)
+
             elif cmd == "genkeys":
                 messenger.generate_keys()
+
             elif cmd == "sendmsg":
-                to = console.print("[bold green]>>[/bold green] ", end=""); input("Recipient pubkey path: ")
-                msg = console.print("[bold green]>>[/bold green] ", end=""); input("Message: ")
+                to = input("Recipient pubkey path: ")
+                msg = input("Message: ")
                 messenger.send_message(to, msg)
+
             elif cmd == "recvmsg":
                 priv = find_file("my_privkey.bin")
                 msgf = find_file("msg.dat")
                 console.print(f"🔐 Using private key: {priv}")
                 console.print(f"📩 Reading message from: {msgf}")
                 messenger.receive_message(priv, msgf)
+
             elif cmd == "tornew":
                 renew_tor_circuit()
+
             elif cmd.startswith("findonions "):
                 keywords = cmd.split(" ", 1)[1]
                 onion_discovery(keywords, extra_stealth_options=extra_stealth_options if stealth_on else {})
+
             elif cmd == "wipe":
                 pq_logger.panic()
                 trigger_self_destruct("Manual wipe")
+
             elif cmd == "exit":
                 console.print("🧩 Exiting securely.")
                 phishing_detector.flush_logs_on_exit()
+                SecureCleanup.shutdown_cleanup({
+                    "log_path": "log.enc",
+                    "tor_manager": tor_manager,
+                    "ram_path": None,
+                    "encrypted_store": None,
+                    "kyber_manager": None
+                })
                 break
+
             else:
                 console.print("❓ Unknown command. Type `help` for options.")
+
         except KeyboardInterrupt:
             console.print("\n⛔ Ctrl+C - exit requested.")
             phishing_detector.flush_logs_on_exit()
+            SecureCleanup.shutdown_cleanup({
+                "log_path": "log.enc",
+                "tor_manager": tor_manager,
+                "ram_path": None,
+                "encrypted_store": None,
+                "kyber_manager": None
+            })
             break
+
     threading.Thread(target=tor_auto_renew_thread, daemon=True).start()
     threading.Thread(target=decoy_traffic_thread, args=(extra_stealth_options,), daemon=True).start()
 
@@ -1772,7 +1943,3 @@ if __name__ == "__main__":
         cli_main()
     else:
         repl_main()
-
-
-
-
