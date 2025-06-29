@@ -1718,19 +1718,6 @@ def repl_main():
             if not cmd:
                 continue
 
-            if cmd.isdigit():
-                index = int(cmd) - 1
-                if 0 <= index < len(TOOLS):
-                    tool_name = TOOLS[index]
-                    console.print(f"🛠️  Launching tool: {tool_name}")
-                    open_tool(tool_name)
-                    continue
-
-            if cmd.lower() in TOOLS:
-                console.print(f"🛠️  Launching tool: {cmd.lower()}")
-                open_tool(cmd.lower())
-                continue
-
             elif cmd == "checkip":
                 check_my_ip()
 
