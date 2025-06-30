@@ -1332,6 +1332,7 @@ def print_help():
         ("browser",               "Launch Darkelf CLI Browser"),
         ("wipe",                  "Self-destruct and wipe sensitive files"),
         ("checkip",               "Verify you're routed through Tor"),
+        ("tlsstatus",             "Show recent TLS Monitor activity"),
         ("beacon <.onion>",       "Check if a .onion site is reachable via Tor"),
         ("help",                  "Show this help menu"),
         ("exit",                  "Exit the browser")
@@ -1380,6 +1381,29 @@ def print_tools_help():
         left = f"{i+1:>2}. {col1[i]:<12}"
         right = f"{i+1+half:>2}. {col2[i]}"
         console.print(f"  {left} {right}")
+        
+def check_tls_status():
+    try:
+        log_path = "darkelf_tls_monitor.log"
+        if not os.path.exists(log_path):
+            print("[!] TLS monitor log file not found.")
+            return
+
+        with open(log_path, "rb") as f:
+            file_size = os.path.getsize(log_path)
+            seek_size = min(2048, file_size)  # Avoid going before start of file
+            f.seek(-seek_size, os.SEEK_END)
+            lines = f.readlines()
+            last_entries = lines[-10:]
+
+        print("\n[*] TLS Monitor Status:")
+        print("- Log file: darkelf_tls_monitor.log")
+        print("- Last 10 log entries:")
+        for line in last_entries:
+            print(" ", line.decode("utf-8", errors="ignore").strip())
+
+    except Exception as e:
+        print(f"[!] Error checking TLS status: {e}")
         
 def cli_main():
     setup_logging()
@@ -1763,6 +1787,15 @@ class DarkelfUtils:
         except Exception as e:
             console.print(f"[🚫] Failed to reach onion service: {e}")
             
+# Logging Setup
+logging.basicConfig(
+    filename="darkelf_tls_monitor.log",
+    filemode="a",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logger = logging.getLogger("DarkelfTLSMonitor")
+
 # TLS Certificate Fingerprint Helper
 
 def get_cert_hash(hostname: str, port: int = 443) -> Optional[str]:
@@ -1773,7 +1806,7 @@ def get_cert_hash(hostname: str, port: int = 443) -> Optional[str]:
                 der_cert = ssock.getpeercert(binary_form=True)
         return hashlib.sha256(der_cert).hexdigest()
     except Exception as e:
-        print(f"[DarkelfAI] ❌ Error retrieving certificate for {hostname}: {e}")
+        logger.error(f" Error retrieving certificate for {hostname}: {e}")
         return None
         
 class DarkelfTLSMonitorJA3:
@@ -1838,26 +1871,26 @@ class DarkelfTLSMonitorJA3:
             # 2. Independently fetch and hash the real cert using ssl
             cert_hash = get_cert_hash(site)
             if not cert_hash:
-                print(f"[DarkelfAI] ❌ Could not extract certificate for {site}")
+                logger.error(f" Could not extract certificate for {site}")
                 return
             if site not in self.fingerprints:
-                print(f"[DarkelfAI] 📌 Initial fingerprint for {site}: {cert_hash}")
+                logger.info(f" Initial fingerprint for {site}: {cert_hash}")
                 self.fingerprints[site] = cert_hash
             elif self.fingerprints[site] != cert_hash:
-                print(f"[DarkelfAI] ⚠️ TLS CERT ROTATION for {site}")
+                logger.warning(f" TLS CERT ROTATION for {site}")
                 print(f"Old: {self.fingerprints[site]}")
                 print(f"New: {cert_hash}")
                 self.fingerprints[site] = cert_hash
             else:
-                print(f"[DarkelfAI] ✅ No change in cert for {site}")
+                logger.info(f" No change in cert for {site}")
         except Exception as e:
-            print(f"[DarkelfAI] ❌ Error checking {site}: {e}")
+            logger.error(f" Error checking {site}: {e}")
 
     async def monitor_loop(self):
         """Main monitoring loop. Runs until .stop() is called."""
         while self.running:
             headers = self.rotate_headers()
-            print(f"[DarkelfAI] 🔁 Rotating User-Agent: {headers['User-Agent']}")
+            logger.info(f" Rotating User-Agent: {headers['User-Agent']}")
             tasks = [self.check_cert(site, headers) for site in self.sites]
             await asyncio.gather(*tasks)
             await asyncio.sleep(self.interval)
@@ -1865,17 +1898,17 @@ class DarkelfTLSMonitorJA3:
     def start(self):
         """Starts the monitor in a background thread."""
         def runner():
-            print("[DarkelfAI] ✅ TLS Monitor started in background thread.")
+            logger.info(" ✅ TLS Monitor started in background thread.")
             asyncio.run(self.monitor_loop())
         thread = threading.Thread(target=runner, daemon=True)
         thread.start()
-        print("[DarkelfAI] ✅ TLS Monitor running in background thread.")
+        logger.info(" ✅ TLS Monitor running in background thread.")
 
     def stop(self):
         """Stops the monitoring loop."""
         self.running = False
-        print("[DarkelfAI] 🛑 TLS Monitor stopped.")
-    
+        logger.info(" 🛑 TLS Monitor stopped.")
+        
 class SecureCleanup:
     @staticmethod
     def secure_delete(file_path):
@@ -2082,31 +2115,43 @@ def repl_main():
 
             elif cmd == "checkip":
                 check_my_ip()
+                print()
+                
+            elif cmd == "tlsstatus":
+                check_tls_status()
+                print()
                 
             # inside the REPL command checks
             elif cmd.startswith("beacon "):
                 onion = cmd.split(" ", 1)[1]
                 utils.beacon_onion_service(onion)
+                print()
                 
             elif cmd == "tools":
                 print_tools_help()
+                print()
 
             elif cmd.startswith("tool "):
                 tool_name = cmd.split(" ", 1)[1]
                 open_tool(tool_name)
+                print()
 
             elif cmd == "toolinfo":
                 print_toolinfo()
+                print()
                 
             elif cmd == "help":
                 print_help()
+                print()
 
             elif cmd == "browser":
                 DarkelfCLIBrowser().run()
+                print()
 
             elif cmd == "stealth":
                 stealth_on = not stealth_on
                 console.print("🫥 Extra stealth options are now", "ENABLED" if stealth_on else "DISABLED")
+                print()
 
             elif cmd.startswith("search "):
                 q = cmd.split(" ", 1)[1]
@@ -2115,6 +2160,7 @@ def repl_main():
                 if suspicious:
                     console.print(f"⚠️ [PHISHING WARNING] {reason}")
                 fetch_and_display(url, extra_stealth_options=extra_stealth_options if stealth_on else {}, debug=False)
+                print()
 
             elif cmd.startswith("debug "):
                 q = cmd.split(" ", 1)[1]
@@ -2123,12 +2169,15 @@ def repl_main():
                 if suspicious:
                     console.print(f"⚠️ [PHISHING WARNING] {reason}")
                 fetch_and_display(url, extra_stealth_options=extra_stealth_options if stealth_on else {}, debug=True)
+                print()
 
             elif cmd == "duck":
                 fetch_and_display(DUCKDUCKGO_LITE, extra_stealth_options=extra_stealth_options if stealth_on else {}, debug=False)
+                print()
 
             elif cmd == "genkeys":
                 messenger.generate_keys()
+                print()
 
             elif cmd == "sendmsg":
                 to = input("Recipient pubkey path: ")
@@ -2144,14 +2193,17 @@ def repl_main():
 
             elif cmd == "tornew":
                 renew_tor_circuit()
+                print()
 
             elif cmd.startswith("findonions "):
                 keywords = cmd.split(" ", 1)[1]
                 onion_discovery(keywords, extra_stealth_options=extra_stealth_options if stealth_on else {})
+                print()
 
             elif cmd == "wipe":
                 pq_logger.panic()
                 trigger_self_destruct("Manual wipe")
+                print()
 
             elif cmd == "exit":
                 console.print("🧩 Exiting securely.")
