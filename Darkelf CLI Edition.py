@@ -78,6 +78,7 @@ import zlib
 import oqs
 import re
 import ssl
+import signal
 import tls_client
 from collections import deque
 from typing import Optional, List, Dict
@@ -1247,70 +1248,6 @@ def onion_discovery(keywords, extra_stealth_options=None):
     except Exception as e:
         console.print("  ▪ Error during onion discovery:", e)
 
-# 🌐 Global list of supported tools
-TOOLS = [
-    "sherlock", "shodan", "recon-ng", "theharvester", "nmap", "yt-dlp",
-    "maltego", "masscan", "amass", "subfinder", "exiftool", "mat2",
-    "neomutt", "dnstwist", "gitleaks", "httpx", "p0f", "thunderbird"
-]
-
-def open_tool(tool):
-    """
-    Open a terminal tool by name in a new window, installing via Homebrew if missing.
-    """
-    allowed_tools = TOOLS
-    tool = tool.lower()
-    if tool not in allowed_tools:
-        console.print(f"Tool '{tool}' is not in the allowed list.")
-        return
-
-    system = platform.system()
-
-    def is_installed(tool_name):
-        try:
-            subprocess.run(["which", tool_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-            return True
-        except subprocess.CalledProcessError:
-            return False
-
-    try:
-        if system == "Darwin":  # macOS
-            if is_installed(tool):
-                command = f"{tool}"
-            else:
-                console.print(f"📦 Installing '{tool}' via Homebrew...")
-                command = f"brew install {tool}; {tool}"
-            subprocess.run([
-                "osascript", "-e",
-                f'''tell application "Terminal"
-    do script "{command}"
-    activate
-end tell'''
-            ], check=True)
-
-        elif system == "Linux":
-            if is_installed(tool):
-                command = f"{tool}"
-            else:
-                console.print(f"📦 Installing '{tool}' via Homebrew...")
-                command = f"brew install {tool} && {tool}"
-            subprocess.run([
-                "gnome-terminal", "--", "sh", "-c", f"{command}; exec bash"
-            ], check=True)
-
-        elif system == "Windows":
-            command = f"{tool}" if is_installed(tool) else f"brew install {tool} && {tool}"
-            subprocess.run([
-                "cmd.exe", "/c", "start", "cmd.exe", "/k", command
-            ], check=True)
-
-        else:
-            console.print(f"Unsupported platform: {system}")
-
-    except Exception as e:
-        console.print(f"❌ Failed to open tool '{tool}': {e}")
-
-
 def print_help():
     console.print("Darkelf CLI Browser — Command Reference\n")
     console.print("Select by number or type full command:\n")
@@ -1370,6 +1307,97 @@ def get_key():
         return key
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        
+# === Enhancement Patch for Darkelf CLI ===
+# Drop-in ready upgrades: session isolation, PQ log separation, entropy check,
+# SIGTERM memory wipe, and TLS fingerprint mimic via uTLS for clearnet requests
+
+# 1. === Strong Entropy Check ===
+def ensure_strong_entropy(min_bytes=256):
+    try:
+        with open("/dev/random", "rb") as f:
+            entropy = f.read(min_bytes)
+        if len(entropy) < min_bytes:
+            raise RuntimeError("Insufficient entropy available from /dev/random")
+    except Exception as e:
+        print(f"[EntropyCheck] ⚠️ Warning: {e}")
+
+# 2. === Session Isolation Wrapper ===
+def fetch_with_isolated_session(url, method="GET", headers=None, data=None, timeout=30):
+    session = requests.Session()  # New session per call
+    proxies = {"http": get_tor_proxy(), "https": get_tor_proxy()}
+    try:
+        if method == "POST":
+            resp = session.post(url, headers=headers, data=data, proxies=proxies, timeout=timeout)
+        else:
+            resp = session.get(url, headers=headers, proxies=proxies, timeout=timeout)
+        resp.raise_for_status()
+        return resp.text, resp.headers
+    except Exception as e:
+        return f"[ERROR] {e}", {}
+
+# 3. === PQ Log Separation (Split by Purpose) ===
+class PQLogManager:
+    def __init__(self, key):
+        self.fernet = Fernet(key)
+        self.logs = {"phishing": [], "onion": [], "tools": []}
+
+    def log(self, category, message):
+        if category not in self.logs:
+            self.logs[category] = []
+        encrypted = self.fernet.encrypt(message.encode())
+        self.logs[category].append(encrypted)
+
+    def flush_all(self, base_path="darkelf_logs"):
+        os.makedirs(base_path, exist_ok=True)
+        for cat, entries in self.logs.items():
+            with open(os.path.join(base_path, f"{cat}.log"), "wb") as f:
+                for line in entries:
+                    f.write(line + b"\n")
+
+# 4. === SIGTERM Triggered Memory Wipe ===
+TEMP_SENSITIVE_FILES = ["log.enc", "msg.dat", "my_privkey.bin"]
+
+def sigterm_cleanup_handler(signum, frame):
+    print("\n[Darkelf] 🔐 SIGTERM received. Wiping sensitive files...")
+    for f in TEMP_SENSITIVE_FILES:
+        if os.path.exists(f):
+            with open(f, "ba+") as wipe:
+                wipe.write(secrets.token_bytes(2048))
+            os.remove(f)
+    exit(0)
+
+signal.signal(signal.SIGTERM, sigterm_cleanup_handler)
+
+# 5. === uTLS Mimicry for Clearnet Requests ===
+try:
+    import tls_client
+
+    def clearnet_request_utls(url, user_agent):
+        session = tls_client.Session(client_identifier="firefox_117")
+        return session.get(
+            url,
+            headers={"User-Agent": user_agent},
+            proxy="socks5://127.0.0.1:9052",
+            timeout_seconds=20,
+            allow_redirects=True
+        )
+except ImportError:
+    def clearnet_request_utls(url, user_agent):
+        return requests.get(
+            url,
+            headers={"User-Agent": user_agent},
+            proxies={"http": get_tor_proxy(), "https": get_tor_proxy()},
+            timeout=20
+        )
+
+# Helper — Tor Proxy
+
+def get_tor_proxy():
+    return "socks5h://127.0.0.1:9052"
+
+# Ensure entropy at program start
+ensure_strong_entropy()
 
 console = Console()
 
@@ -1931,19 +1959,6 @@ def repl_main():
             if not cmd:
                 continue
 
-            if cmd.isdigit():
-                index = int(cmd) - 1
-                if 0 <= index < len(TOOLS):
-                    tool_name = TOOLS[index]
-                    console.print(f"🛠️  Launching tool: {tool_name}")
-                    open_tool(tool_name)
-                    continue
-
-            if cmd.lower() in TOOLS:
-                console.print(f"🛠️  Launching tool: {cmd.lower()}")
-                open_tool(cmd.lower())
-                continue
-
             elif cmd == "checkip":
                 check_my_ip()
                 
@@ -2038,8 +2053,25 @@ def repl_main():
     threading.Thread(target=decoy_traffic_thread, args=(extra_stealth_options,), daemon=True).start()
 
 if __name__ == "__main__":
+    # Step 1: Ensure strong entropy
+    ensure_strong_entropy()
+
+    # Step 2: Secure shutdown handlers
+    signal.signal(signal.SIGTERM, sigterm_cleanup_handler)
+    signal.signal(signal.SIGINT, sigterm_cleanup_handler)
+
+    # Step 3: PQ Logger initialization
+    pq_logger = PQLogManager(get_fernet_key())
+    pq_logger.log("tools", "✅ Darkelf CLI booted successfully.")
+    pq_logger.flush_all()
+
+    # Step 4: CLI or REPL routing
     cli_commands = {"generate-keys", "send", "receive"}
     if len(sys.argv) > 1 and sys.argv[1] in cli_commands:
         cli_main()
     else:
         repl_main()
+
+    # Step 5: In-memory log cleanup
+    for category in pq_logger.logs:
+        pq_logger.logs[category].clear()
