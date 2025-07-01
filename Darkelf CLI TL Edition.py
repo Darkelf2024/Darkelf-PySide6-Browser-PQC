@@ -1313,7 +1313,7 @@ end tell'''
         
 def print_help():
     console.print("Darkelf CLI Browser — Command Reference\n")
-    console.print("Select by number or type full command:\n")
+    console.print("Select by and type full command:\n")
 
     commands = [
         ("search <keywords>",     "Search DuckDuckGo (onion)"),
