@@ -849,8 +849,7 @@ class TorManagerCLI:
         self.stop_tor()
 
 def duckduckgo_search(query):
-
-    # Add jitter to mimic human-like behavior
+    import html
     time.sleep(random.uniform(2, 5))
 
     headers = {
@@ -864,17 +863,18 @@ def duckduckgo_search(query):
             'https': get_tor_proxy(),
         }
         url = DUCKDUCKGO_LITE + f"?q={quote_plus(query)}"
-        response = session.get(url, headers=headers, timeout=15)
+        response = session.get(url, headers=headers, timeout=20)
 
         soup = BeautifulSoup(response.text, 'html.parser')
-
         results = []
 
-        for link in soup.find_all("a", href=True):
-            href = link.get("href")
-            text = link.get_text(strip=True)
-            if href.startswith(("http://", "https://")) and text:
-                results.append((text, href))
+        # DuckDuckGo Lite format: <a rel="nofollow" class="result-link" href="...">Title</a>
+        for a in soup.find_all("a", href=True):
+            if "result" in a.get("class", []) or "nofollow" in a.get("rel", []):
+                href = html.unescape(a["href"])
+                text = a.get_text(strip=True)
+                if href.startswith(("http://", "https://")) and text:
+                    results.append((text, href))
 
         if not results:
             debug_path = f"/tmp/ddg_debug_{query.replace(' ', '_')}.html"
@@ -887,7 +887,7 @@ def duckduckgo_search(query):
     except Exception as e:
         console.print(f"[Darkelf] DuckDuckGo search error for '{query}': {e}")
         return []
-        
+
 def get_tor_proxy():
     return f"socks5h://127.0.0.1:9052"
 
@@ -1247,7 +1247,7 @@ def onion_discovery(keywords, extra_stealth_options=None):
             console.print("  ▪ No .onion services found for this query.")
     except Exception as e:
         console.print("  ▪ Error during onion discovery:", e)
-
+        
 # 🌐 Global list of supported tools
 TOOLS = [
     "sherlock", "shodan", "recon-ng", "theharvester", "nmap", "yt-dlp",
@@ -1310,8 +1310,7 @@ end tell'''
 
     except Exception as e:
         console.print(f"❌ Failed to open tool '{tool}': {e}")
-
-
+        
 def print_help():
     console.print("Darkelf CLI Browser — Command Reference\n")
     console.print("Select by number or type full command:\n")
@@ -1335,6 +1334,7 @@ def print_help():
         ("tlsstatus",             "Show recent TLS Monitor activity"),
         ("beacon <.onion>",       "Check if a .onion site is reachable via Tor"),
         ("help",                  "Show this help menu"),
+        ("osintscan <term|url>",  "Fetch a URL & extract emails, phones, etc."),
         ("exit",                  "Exit the browser")
     ]
 
@@ -1404,7 +1404,7 @@ def check_tls_status():
 
     except Exception as e:
         print(f"[!] Error checking TLS status: {e}")
-        
+
 def cli_main():
     setup_logging()
     parser = argparse.ArgumentParser(description="DarkelfMessenger: PQC CLI Messenger")
@@ -1503,7 +1503,6 @@ signal.signal(signal.SIGTERM, sigterm_cleanup_handler)
 
 # 5. === uTLS Mimicry for Clearnet Requests ===
 try:
-    import tls_client
 
     def clearnet_request_utls(url, user_agent):
         session = tls_client.Session(client_identifier="firefox_117")
@@ -1787,6 +1786,159 @@ class DarkelfUtils:
         except Exception as e:
             console.print(f"[🚫] Failed to reach onion service: {e}")
             
+def osintscan(query):
+    import html
+    headers = {'User-Agent': random.choice(USER_AGENTS)}
+    proxies = {'http': get_tor_proxy(), 'https': get_tor_proxy()}
+    url = DUCKDUCKGO_LITE + f"?q={quote_plus(query)}"
+
+    # --- Detect type ---
+    is_email = bool(re.match(r"^[^@]+@[^@]+\.[^@]+$", query))
+    is_phone = bool(re.match(r"^\+?\d[\d\s\-().]{6,}$", query))
+    is_username = bool(re.match(r"^@?[a-zA-Z0-9_.-]{3,32}$", query)) and not is_email and not is_phone
+
+    username = query.lstrip('@') if is_username else None
+    phone = re.sub(r"[^\d]", "", query) if is_phone else None
+    email = query if is_email else None
+
+    # --- Direct links to locations ---
+    direct_links = []
+
+    if is_username:
+        platforms = {
+            "Twitter": f"https://twitter.com/{username}",
+            "GitHub": f"https://github.com/{username}",
+            "Instagram": f"https://instagram.com/{username}",
+            "Reddit": f"https://reddit.com/user/{username}",
+            "Facebook": f"https://facebook.com/{username}",
+            "TikTok": f"https://tiktok.com/@{username}",
+            "LinkedIn Search": f"https://www.linkedin.com/search/results/all/?keywords={username}",
+            "Pinterest": f"https://www.pinterest.com/{username}/",
+        }
+        direct_links = [(site, link) for site, link in platforms.items()]
+
+    elif is_email:
+        platforms = {
+            "Google Search": f"https://www.google.com/search?q={quote_plus(email)}",
+            "HaveIBeenPwned": f"https://haveibeenpwned.com/unifiedsearch/{quote_plus(email)}",
+            "Hunter.io": f"https://hunter.io/search/{quote_plus(email)}",
+            "LinkedIn Search": f"https://www.linkedin.com/search/results/all/?keywords={quote_plus(email)}",
+            "Twitter Search": f"https://twitter.com/search?q={quote_plus(email)}",
+            "Facebook Search": f"https://www.facebook.com/search/top/?q={quote_plus(email)}",
+            "Skype Search": f"https://www.skype.com/en/search/?q={quote_plus(email)}",
+            "DuckDuckGo": f"https://duckduckgo.com/?q={quote_plus(email)}"
+        }
+        direct_links = [(site, link) for site, link in platforms.items()]
+
+    elif is_phone:
+        platforms = {
+            "Google Search": f"https://www.google.com/search?q={quote_plus(query)}",
+            "Sync.me": f"https://sync.me/search/?number={phone}",
+            "TrueCaller": f"https://www.truecaller.com/search/{phone[:2]}/{phone}", # Assumes country code present
+            "Facebook Search": f"https://www.facebook.com/search/top/?q={quote_plus(query)}",
+            "Twitter Search": f"https://twitter.com/search?q={quote_plus(query)}",
+            "DuckDuckGo": f"https://duckduckgo.com/?q={quote_plus(query)}"
+        }
+        direct_links = [(site, link) for site, link in platforms.items()]
+
+    # --- Print direct links if found ---
+    if direct_links:
+        console.print(f"\n[cyan]🔗 Direct OSINT links for query:[/cyan] [bold]{query}[/bold]")
+        for site, link in direct_links:
+            console.print(f"   [magenta]{site}:[/magenta] [green]{link}[/green]")
+
+    # --- Standard DDG/Onion scraping as before ---
+    try:
+        response = requests.get(url, headers=headers, proxies=proxies, timeout=20)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        results = []
+        for a in soup.find_all("a", href=True):
+            href = html.unescape(a["href"])
+            text = a.get_text(strip=True)
+            if href.startswith("http"):
+                results.append((text, href))
+
+        if not results:
+            url_matches = set(re.findall(r'https?://[^\s"\'<>]+', response.text))
+            if url_matches:
+                console.print(f"[yellow]🔗 URLs found by regex fallback:[/yellow]")
+                for link in url_matches:
+                    console.print(f"   [green]{link}[/green]")
+                results = [("", link) for link in url_matches]
+            else:
+                console.print("[red]No URLs found in DuckDuckGo results.[/red]")
+        else:
+            console.print(f"[yellow]🔗 URLs found in DuckDuckGo results:[/yellow]")
+            for txt, link in results:
+                console.print(f"   [green]{link}[/green] ({txt})")
+
+        # Add direct links to scan list for OSINT, but don't scan Google.com etc.
+        scan_urls = [u for _, u in results]
+        if direct_links:
+            # Only scan social URLs, not search engine links
+            scan_urls += [link for site, link in direct_links if not any(s in site.lower() for s in ["search", "google", "duckduckgo"])]
+
+        # OSINT extraction
+        all_data = {
+            "emails": set(),
+            "phone_numbers": set(),
+            "social_handles": set(),
+            "crypto_wallets": set(),
+            "ip_addresses": set(),
+            "urls": set(),
+        }
+        for u in scan_urls:
+            all_data["urls"].add(u)
+        for u in scan_urls[:5]:
+            console.print(f"[blue]→ Scanning:[/blue] {u}")
+            try:
+                html_content, _ = fetch_with_requests(u)
+                osint_data = extract_osint_data(html_content, source_url=u)
+                for key in all_data:
+                    all_data[key].update(osint_data.get(key, []))
+            except Exception as e:
+                console.print(f"[red]  Failed to fetch or parse {u}: {e}[/red]")
+
+        # Show summary
+        console.print("\n[yellow bold]📊 OSINT Summary:[/yellow bold]")
+        for key, values in all_data.items():
+            if values:
+                console.print(f"[cyan]{key}[/cyan]:")
+                for v in sorted(values):
+                    console.print(f"   [green]- {v}[/green]")
+            else:
+                console.print(f"[dim]{key}: (none found)[/dim]")
+
+    except Exception as e:
+        console.print(f"[red]OSINT scan failed: {e}[/red]")
+        
+# --- OSINT Scanning Integration ---
+def extract_osint_data(html_content: str, source_url: str = "(unknown)") -> dict:
+
+        data = {
+            "emails": list(set(re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", html_content))),
+            "phone_numbers": list(set(re.findall(r"\b\+?\d{1,4}?[-.\s]?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}\b", html_content))),
+            "social_handles": list(set(re.findall(r"(?:@\w{2,}|(?:twitter|facebook|instagram)\.com/\w+)", html_content))),
+            "crypto_wallets": list(set(re.findall(r"\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b", html_content))),  # BTC wallet format
+            "ip_addresses": list(set(re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", html_content))),
+            "urls": list(set(re.findall(r"https?://[^\s\"'>]+", html_content))),
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "source_url": source_url
+        }
+        return data
+
+def save_osint_data_to_json(data: dict, output_path: str = "osint_scrape_output.json"):
+    try:
+        with open(output_path, "r") as infile:
+            existing = json.load(infile)
+    except (FileNotFoundError, json.JSONDecodeError):
+        existing = []
+
+    existing.append(data)
+
+    with open(output_path, "w") as outfile:
+        json.dump(existing, outfile, indent=4)
+
 # Logging Setup
 logging.basicConfig(
     filename="darkelf_tls_monitor.log",
@@ -1908,7 +2060,7 @@ class DarkelfTLSMonitorJA3:
         """Stops the monitoring loop."""
         self.running = False
         logger.info(" 🛑 TLS Monitor stopped.")
-        
+    
 class SecureCleanup:
     @staticmethod
     def secure_delete(file_path):
@@ -2099,7 +2251,7 @@ def repl_main():
             cmd = input("darkelf> ").strip()
             if not cmd:
                 continue
-
+                
             if cmd.isdigit():
                 index = int(cmd) - 1
                 if 0 <= index < len(TOOLS):
@@ -2120,7 +2272,7 @@ def repl_main():
             elif cmd == "tlsstatus":
                 check_tls_status()
                 print()
-                
+
             # inside the REPL command checks
             elif cmd.startswith("beacon "):
                 onion = cmd.split(" ", 1)[1]
@@ -2152,6 +2304,13 @@ def repl_main():
                 stealth_on = not stealth_on
                 console.print("🫥 Extra stealth options are now", "ENABLED" if stealth_on else "DISABLED")
                 print()
+
+            elif cmd.startswith("osintscan "):
+                query = cmd[len("osintscan "):].strip()
+                try:
+                    osintscan(query)
+                except Exception as e:
+                    console.print(f"[red]OSINT scan failed: {e}[/red]")
 
             elif cmd.startswith("search "):
                 q = cmd.split(" ", 1)[1]
