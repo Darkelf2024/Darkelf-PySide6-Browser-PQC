@@ -1593,8 +1593,7 @@ class DarkelfCLIBrowser:
                 console.print("[bold green]>>[/bold green] ", end="")
                 url = input().strip()
                 if not url:
-                    console.print("[red]No URL entered. Cancelling.[/blue]")
-                    return
+                    continue
                 if not url.startswith(("http://", "https://")):
                     url = "https://" + url
                 self.visit(url)
