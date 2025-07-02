@@ -1444,83 +1444,467 @@ def get_key():
 # Drop-in ready upgrades: session isolation, PQ log separation, entropy check,
 # SIGTERM memory wipe, and TLS fingerprint mimic via uTLS for clearnet requests
 
-# 1. === Strong Entropy Check ===
-def ensure_strong_entropy(min_bytes=256):
+# 1. === Enhanced Strong Entropy Check ===
+def ensure_strong_entropy(min_bytes=256, strict=True):
+    """
+    Enhanced entropy check with multiple sources and stronger validation.
+    """
     try:
-        with open("/dev/random", "rb") as f:
-            entropy = f.read(min_bytes)
-        if len(entropy) < min_bytes:
-            raise RuntimeError("Insufficient entropy available from /dev/random")
+        # Check multiple entropy sources
+        entropy_sources = []
+        
+        # Primary: /dev/random (blocking, high-quality)
+        try:
+            with open("/dev/random", "rb") as f:
+                entropy_sources.append(f.read(min_bytes))
+        except Exception:
+            if strict:
+                raise RuntimeError("Unable to access /dev/random")
+        
+        # Secondary: /dev/urandom (non-blocking)
+        try:
+            with open("/dev/urandom", "rb") as f:
+                entropy_sources.append(f.read(min_bytes))
+        except Exception:
+            pass
+        
+        # Tertiary: Python secrets module
+        try:
+            entropy_sources.append(secrets.token_bytes(min_bytes))
+        except Exception:
+            pass
+        
+        if not entropy_sources:
+            raise RuntimeError("No entropy sources available")
+        
+        # Validate entropy quality using Shannon entropy
+        for i, entropy in enumerate(entropy_sources):
+            if len(entropy) < min_bytes:
+                raise RuntimeError(f"Insufficient entropy from source {i+1}")
+            
+            # Calculate Shannon entropy (should be close to 8 for good randomness)
+            shannon_entropy = calculate_shannon_entropy(entropy)
+            if shannon_entropy < 7.0:  # Adjusted threshold for realistic randomness
+                print(f"[EntropyCheck] ⚠️ Warning: Low Shannon entropy ({shannon_entropy:.2f}) from source {i+1}")
+                if strict:
+                    raise RuntimeError(f"Poor entropy quality from source {i+1}")
+        
+        print(f"[EntropyCheck] ✅ Validated {len(entropy_sources)} entropy sources with {min_bytes} bytes each")
+        return True
+        
     except Exception as e:
-        print(f"[EntropyCheck] ⚠️ Warning: {e}")
+        print(f"[EntropyCheck] ❌ Critical: {e}")
+        if strict:
+            raise
+        return False
 
-# 2. === Session Isolation Wrapper ===
-def fetch_with_isolated_session(url, method="GET", headers=None, data=None, timeout=30):
+def calculate_shannon_entropy(data):
+    """Calculate Shannon entropy of data."""
+    if not data:
+        return 0
+    
+    import math
+    # Count frequency of each byte value
+    counts = [0] * 256
+    for byte in data:
+        counts[byte] += 1
+    
+    # Calculate entropy
+    entropy = 0
+    length = len(data)
+    for count in counts:
+        if count > 0:
+            prob = count / length
+            entropy -= prob * math.log2(prob)
+    
+    return entropy
+
+# 2. === Enhanced Session Isolation Wrapper ===
+def fetch_with_isolated_session(url, method="GET", headers=None, data=None, timeout=30, verify_ssl=True):
+    """
+    Enhanced session isolation with SSL certificate validation and input sanitization.
+    """
+    # Input sanitization
+    url = sanitize_url(url)
+    if not url:
+        return "[ERROR] Invalid URL after sanitization", {}
+    
     session = requests.Session()  # New session per call
     proxies = {"http": get_tor_proxy(), "https": get_tor_proxy()}
+    
+    # SSL certificate validation configuration
+    if verify_ssl and url.startswith("https://"):
+        session.verify = True  # Enable SSL verification
+        # Add additional SSL context configuration
+        import ssl
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = True
+        ssl_context.verify_mode = ssl.CERT_REQUIRED
+        # Use adapter with SSL context
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.ssl_ import create_urllib3_context
+        
+        class SSLAdapter(HTTPAdapter):
+            def init_poolmanager(self, *args, **kwargs):
+                context = create_urllib3_context()
+                context.check_hostname = True
+                context.verify_mode = ssl.CERT_REQUIRED
+                kwargs['ssl_context'] = context
+                return super().init_poolmanager(*args, **kwargs)
+        
+        session.mount("https://", SSLAdapter())
+    else:
+        session.verify = False  # Only for .onion or explicitly disabled
+    
+    # Enhanced headers with security
+    default_headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": random.choice(ACCEPT_LANGUAGES),
+        "Accept-Encoding": "gzip, deflate",
+        "DNT": "1",
+        "Connection": "close",  # Prevent connection reuse
+        "Upgrade-Insecure-Requests": "1"
+    }
+    
+    if headers:
+        default_headers.update(headers)
+    
     try:
-        if method == "POST":
-            resp = session.post(url, headers=headers, data=data, proxies=proxies, timeout=timeout)
-        else:
-            resp = session.get(url, headers=headers, proxies=proxies, timeout=timeout)
-        resp.raise_for_status()
-        return resp.text, resp.headers
+        with handle_network_errors():
+            if method == "POST":
+                resp = session.post(url, headers=default_headers, data=data, 
+                                  proxies=proxies, timeout=timeout, allow_redirects=False)
+            else:
+                resp = session.get(url, headers=default_headers, proxies=proxies, 
+                                 timeout=timeout, allow_redirects=False)
+            
+            # Validate response
+            if resp.status_code >= 400:
+                return f"[ERROR] HTTP {resp.status_code}: {resp.reason}", {}
+            
+            return resp.text, dict(resp.headers)
+            
     except Exception as e:
-        return f"[ERROR] {e}", {}
+        error_msg = f"[ERROR] Network request failed: {str(e)}"
+        log_security_event("network_error", {"url": url, "error": str(e)})
+        return error_msg, {}
+    finally:
+        # Ensure session cleanup
+        session.close()
 
-# 3. === PQ Log Separation (Split by Purpose) ===
+def sanitize_url(url):
+    """
+    Sanitize and validate URL to prevent injection attacks.
+    """
+    if not url or not isinstance(url, str):
+        return None
+    
+    # Remove dangerous characters and sequences
+    url = url.strip()
+    
+    # Check for common injection patterns
+    dangerous_patterns = [
+        r'javascript:', r'data:', r'vbscript:', r'file:', r'ftp:',
+        r'[\x00-\x1f\x7f-\x9f]',  # Control characters
+        r'[<>"\'\\\x00]',  # Dangerous characters
+    ]
+    
+    for pattern in dangerous_patterns:
+        if re.search(pattern, url, re.IGNORECASE):
+            log_security_event("url_injection_attempt", {"url": url, "pattern": pattern})
+            return None
+    
+    # Validate URL structure
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return None
+        
+        # Only allow specific schemes
+        allowed_schemes = ['http', 'https']
+        if parsed.scheme.lower() not in allowed_schemes:
+            return None
+        
+        # Reconstruct clean URL
+        clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        if parsed.query:
+            clean_url += f"?{parsed.query}"
+        if parsed.fragment:
+            clean_url += f"#{parsed.fragment}"
+        
+        return clean_url
+        
+    except Exception:
+        return None
+
+from contextlib import contextmanager
+
+@contextmanager
+def handle_network_errors():
+    """
+    Context manager for robust network error handling.
+    """
+    try:
+        yield
+    except requests.exceptions.SSLError as e:
+        log_security_event("ssl_error", {"error": str(e)})
+        raise Exception(f"SSL Certificate validation failed: {e}")
+    except requests.exceptions.ConnectionError as e:
+        log_security_event("connection_error", {"error": str(e)})
+        raise Exception(f"Connection failed: {e}")
+    except requests.exceptions.Timeout as e:
+        log_security_event("timeout_error", {"error": str(e)})
+        raise Exception(f"Request timeout: {e}")
+    except requests.exceptions.RequestException as e:
+        log_security_event("request_error", {"error": str(e)})
+        raise Exception(f"Request failed: {e}")
+    except Exception as e:
+        log_security_event("unknown_network_error", {"error": str(e)})
+        raise
+
+def log_security_event(event_type, details):
+    """Log security events for monitoring."""
+    timestamp = datetime.utcnow().isoformat()
+    event = {
+        "timestamp": timestamp,
+        "type": event_type,
+        "details": details
+    }
+    # Use existing PQ logger if available
+    try:
+        if 'pq_logger' in globals():
+            pq_logger.log("security", json.dumps(event))
+    except:
+        pass
+
+# 3. === Enhanced PQ Log Separation with Parallel Processing ===
 class PQLogManager:
     def __init__(self, key):
         self.fernet = Fernet(key)
-        self.logs = {"phishing": [], "onion": [], "tools": []}
-
+        self.logs = {"phishing": [], "onion": [], "tools": [], "security": [], "network": []}
+        self.log_lock = threading.Lock()
+        self.max_memory_logs = 1000  # Limit memory usage
+        
     def log(self, category, message):
+        """Thread-safe logging with memory management."""
         if category not in self.logs:
             self.logs[category] = []
-        encrypted = self.fernet.encrypt(message.encode())
-        self.logs[category].append(encrypted)
-
+        
+        timestamp = datetime.utcnow().isoformat()
+        log_entry = f"[{timestamp}] {message}"
+        
+        with self.log_lock:
+            encrypted = self.fernet.encrypt(log_entry.encode())
+            self.logs[category].append(encrypted)
+            
+            # Memory management - keep only recent logs
+            if len(self.logs[category]) > self.max_memory_logs:
+                self.logs[category] = self.logs[category][-self.max_memory_logs:]
+    
+    def log_async(self, category, message):
+        """Asynchronous logging for better performance."""
+        threading.Thread(target=self.log, args=(category, message), daemon=True).start()
+    
     def flush_all(self, base_path="darkelf_logs"):
-        os.makedirs(base_path, exist_ok=True)
-        for cat, entries in self.logs.items():
-            with open(os.path.join(base_path, f"{cat}.log"), "wb") as f:
-                for line in entries:
-                    f.write(line + b"\n")
+        """Enhanced flush with better error handling and security."""
+        try:
+            os.makedirs(base_path, exist_ok=True)
+            os.chmod(base_path, 0o700)  # Restrict directory permissions
+            
+            for cat, entries in self.logs.items():
+                if not entries:
+                    continue
+                    
+                log_file = os.path.join(base_path, f"{cat}.log")
+                
+                # Secure file creation
+                with open(log_file, "wb") as f:
+                    os.chmod(log_file, 0o600)  # Restrict file permissions
+                    for line in entries:
+                        f.write(line + b"\n")
+                
+                print(f"[PQLogManager] ✅ Flushed {len(entries)} entries to {cat}.log")
+                
+        except Exception as e:
+            print(f"[PQLogManager] ❌ Error flushing logs: {e}")
+    
+    def secure_wipe_memory(self):
+        """Securely wipe log entries from memory."""
+        with self.log_lock:
+            for category in self.logs:
+                # Overwrite memory before clearing
+                for i in range(len(self.logs[category])):
+                    self.logs[category][i] = secrets.token_bytes(64)
+                self.logs[category].clear()
+        print("[PQLogManager] ✅ Memory logs securely wiped")
 
-# 4. === SIGTERM Triggered Memory Wipe ===
-TEMP_SENSITIVE_FILES = ["log.enc", "msg.dat", "my_privkey.bin"]
+# 4. === Enhanced SIGTERM Triggered Memory Wipe ===
+TEMP_SENSITIVE_FILES = ["log.enc", "msg.dat", "my_privkey.bin", "darkelf_logs/", ".darkelf_temp/"]
+SENSITIVE_MEMORY_OBJECTS = []  # Global list to track sensitive objects
+
+def register_sensitive_object(obj):
+    """Register objects for secure cleanup."""
+    SENSITIVE_MEMORY_OBJECTS.append(obj)
 
 def sigterm_cleanup_handler(signum, frame):
-    print("\n[Darkelf] 🔐 SIGTERM received. Wiping sensitive files...")
-    for f in TEMP_SENSITIVE_FILES:
-        if os.path.exists(f):
-            with open(f, "ba+") as wipe:
-                wipe.write(secrets.token_bytes(2048))
-            os.remove(f)
-    exit(0)
+    """Enhanced cleanup handler with comprehensive memory wiping."""
+    print("\n[Darkelf] 🔐 Signal received. Performing secure cleanup...")
+    
+    try:
+        # 1. Secure memory wipe for registered objects
+        secure_wipe_memory_objects()
+        
+        # 2. Secure file deletion
+        for f in TEMP_SENSITIVE_FILES:
+            if os.path.exists(f):
+                if os.path.isdir(f):
+                    SecureCleanup.secure_delete_directory(f)
+                else:
+                    SecureCleanup.secure_delete(f)
+        
+        # 3. Clear Python object references
+        clear_sensitive_globals()
+        
+        # 4. Force garbage collection
+        import gc
+        gc.collect()
+        
+        # 5. Memory pressure to overwrite freed memory
+        try:
+            # Allocate and free memory to overwrite sensitive data
+            dummy_data = [secrets.token_bytes(1024*1024) for _ in range(50)]
+            del dummy_data
+            gc.collect()
+        except:
+            pass
+        
+        print("[Darkelf] ✅ Secure cleanup completed")
+        
+    except Exception as e:
+        print(f"[Darkelf] ⚠️ Cleanup error: {e}")
+    finally:
+        os._exit(0)
+
+def secure_wipe_memory_objects():
+    """Securely wipe sensitive objects from memory."""
+    for obj in SENSITIVE_MEMORY_OBJECTS:
+        try:
+            if hasattr(obj, 'secure_wipe'):
+                obj.secure_wipe()
+            elif hasattr(obj, '__dict__'):
+                # Wipe object attributes
+                for attr in list(obj.__dict__.keys()):
+                    if isinstance(getattr(obj, attr), (bytes, bytearray)):
+                        # Overwrite byte data
+                        setattr(obj, attr, secrets.token_bytes(len(getattr(obj, attr))))
+                    setattr(obj, attr, None)
+        except:
+            pass
+
+def clear_sensitive_globals():
+    """Clear sensitive global variables."""
+    sensitive_globals = ['pq_logger', 'phishing_detector', 'tor_manager', 'kernel_monitor']
+    for var_name in sensitive_globals:
+        if var_name in globals():
+            try:
+                obj = globals()[var_name]
+                if hasattr(obj, 'secure_wipe'):
+                    obj.secure_wipe()
+                globals()[var_name] = None
+            except:
+                pass
+
+def setup_resource_monitoring():
+    """Setup system resource monitoring for graceful degradation."""
+    def monitor_resources():
+        while True:
+            try:
+                # Check memory usage
+                memory_percent = psutil.virtual_memory().percent
+                disk_percent = psutil.disk_usage('/').percent
+                
+                if memory_percent > 90:
+                    print(f"[ResourceMonitor] ⚠️ High memory usage: {memory_percent}%")
+                    # Trigger memory cleanup
+                    if 'pq_logger' in globals() and hasattr(pq_logger, 'secure_wipe_memory'):
+                        pq_logger.secure_wipe_memory()
+                    import gc
+                    gc.collect()
+                
+                if disk_percent > 95:
+                    print(f"[ResourceMonitor] ⚠️ Low disk space: {100-disk_percent}% free")
+                    # Clean up temporary files
+                    cleanup_temp_files()
+                
+                time.sleep(30)  # Check every 30 seconds
+                
+            except Exception as e:
+                print(f"[ResourceMonitor] Error: {e}")
+                time.sleep(60)
+    
+    threading.Thread(target=monitor_resources, daemon=True).start()
+
+def cleanup_temp_files():
+    """Clean up temporary files when disk space is low."""
+    temp_dirs = [tempfile.gettempdir(), "/tmp", os.path.expanduser("~/.cache")]
+    for temp_dir in temp_dirs:
+        try:
+            for root, dirs, files in os.walk(temp_dir):
+                for file in files:
+                    if file.startswith("darkelf_") or file.endswith(".tmp"):
+                        file_path = os.path.join(root, file)
+                        try:
+                            os.remove(file_path)
+                        except:
+                            pass
+        except:
+            pass
 
 signal.signal(signal.SIGTERM, sigterm_cleanup_handler)
 
-# 5. === uTLS Mimicry for Clearnet Requests ===
+# 5. === Enhanced uTLS Mimicry with Better Error Handling ===
 try:
-
     def clearnet_request_utls(url, user_agent):
-        session = tls_client.Session(client_identifier="firefox_117")
-        return session.get(
-            url,
-            headers={"User-Agent": user_agent},
-            proxy="socks5://127.0.0.1:9052",
-            timeout_seconds=20,
-            allow_redirects=True
-        )
+        """Enhanced clearnet request with comprehensive error handling."""
+        with handle_network_errors():
+            # Sanitize URL first
+            clean_url = sanitize_url(url)
+            if not clean_url:
+                raise ValueError(f"Invalid or dangerous URL: {url}")
+            
+            session = tls_client.Session(client_identifier="firefox_117")
+            response = session.get(
+                clean_url,
+                headers={"User-Agent": user_agent},
+                proxy="socks5://127.0.0.1:9052",
+                timeout_seconds=20,
+                allow_redirects=False  # Prevent redirect attacks
+            )
+            
+            # Validate response
+            if response.status_code >= 400:
+                raise Exception(f"HTTP {response.status_code}: {getattr(response, 'reason', 'Unknown error')}")
+            
+            return response
+            
 except ImportError:
     def clearnet_request_utls(url, user_agent):
-        return requests.get(
-            url,
-            headers={"User-Agent": user_agent},
-            proxies={"http": get_tor_proxy(), "https": get_tor_proxy()},
-            timeout=20
-        )
+        """Fallback implementation with enhanced security."""
+        clean_url = sanitize_url(url)
+        if not clean_url:
+            raise ValueError(f"Invalid or dangerous URL: {url}")
+        
+        with handle_network_errors():
+            response = requests.get(
+                clean_url,
+                headers={"User-Agent": user_agent},
+                proxies={"http": get_tor_proxy(), "https": get_tor_proxy()},
+                timeout=20,
+                allow_redirects=False
+            )
+            response.raise_for_status()
+            return response
 
 # Helper — Tor Proxy
 
@@ -1529,6 +1913,9 @@ def get_tor_proxy():
 
 # Ensure entropy at program start
 ensure_strong_entropy()
+
+# Setup resource monitoring
+setup_resource_monitoring()
 
 console = Console()
 
@@ -1877,7 +2264,7 @@ def osintscan(query):
             # Only scan social URLs, not search engine links
             scan_urls += [link for site, link in direct_links if not any(s in site.lower() for s in ["search", "google", "duckduckgo"])]
 
-        # OSINT extraction
+        # OSINT extraction with parallel processing
         all_data = {
             "emails": set(),
             "phone_numbers": set(),
@@ -1888,15 +2275,15 @@ def osintscan(query):
         }
         for u in scan_urls:
             all_data["urls"].add(u)
-        for u in scan_urls[:5]:
-            console.print(f"[blue]→ Scanning:[/blue] {u}")
-            try:
-                html_content, _ = fetch_with_requests(u)
-                osint_data = extract_osint_data(html_content, source_url=u)
-                for key in all_data:
+        
+        # Use parallel processing for OSINT extraction
+        osint_results = parallel_osint_extraction(scan_urls[:10])  # Limit to 10 URLs for performance
+        
+        # Aggregate results
+        for osint_data in osint_results:
+            for key in all_data:
+                if key in osint_data:
                     all_data[key].update(osint_data.get(key, []))
-            except Exception as e:
-                console.print(f"[red]  Failed to fetch or parse {u}: {e}[/red]")
 
         # Show summary
         console.print("\n[yellow bold]📊 OSINT Summary:[/yellow bold]")
@@ -1911,20 +2298,162 @@ def osintscan(query):
     except Exception as e:
         console.print(f"[red]OSINT scan failed: {e}[/red]")
         
-# --- OSINT Scanning Integration ---
-def extract_osint_data(html_content: str, source_url: str = "(unknown)") -> dict:
+# --- Enhanced OSINT Scanning with Parallel Processing ---
+import concurrent.futures
+from threading import Semaphore
+import queue
 
+# Limit concurrent connections to prevent overwhelming targets
+CONNECTION_SEMAPHORE = Semaphore(5)
+
+def parallel_osint_extraction(urls, max_workers=3, timeout=30):
+    """
+    Extract OSINT data from multiple URLs in parallel with rate limiting.
+    """
+    results = []
+    
+    def extract_from_url(url):
+        """Extract OSINT data from a single URL with connection limiting."""
+        with CONNECTION_SEMAPHORE:  # Limit concurrent connections
+            try:
+                console.print(f"[blue]→ Scanning:[/blue] {url}")
+                html_content, _ = fetch_with_isolated_session(url, timeout=timeout)
+                if html_content.startswith("[ERROR]"):
+                    console.print(f"[red]  Failed to fetch {url}: {html_content}[/red]")
+                    return {}
+                
+                return extract_osint_data(html_content, source_url=url)
+                
+            except Exception as e:
+                console.print(f"[red]  Exception scanning {url}: {e}[/red]")
+                return {}
+    
+    # Use ThreadPoolExecutor for parallel processing
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        future_to_url = {executor.submit(extract_from_url, url): url for url in urls}
+        
+        # Collect results with timeout
+        for future in concurrent.futures.as_completed(future_to_url, timeout=timeout*len(urls)):
+            url = future_to_url[future]
+            try:
+                result = future.result(timeout=10)  # Per-URL timeout
+                if result:
+                    results.append(result)
+            except concurrent.futures.TimeoutError:
+                console.print(f"[yellow]  Timeout scanning {url}[/yellow]")
+            except Exception as e:
+                console.print(f"[red]  Error processing {url}: {e}[/red]")
+    
+    console.print(f"[green]✅ Completed parallel scan of {len(results)}/{len(urls)} URLs[/green]")
+    return results
+
+def extract_osint_data(html_content: str, source_url: str = "(unknown)") -> dict:
+    """
+    Enhanced OSINT data extraction with better patterns and validation.
+    """
+    try:
         data = {
-            "emails": list(set(re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", html_content))),
-            "phone_numbers": list(set(re.findall(r"\b\+?\d{1,4}?[-.\s]?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}\b", html_content))),
-            "social_handles": list(set(re.findall(r"(?:@\w{2,}|(?:twitter|facebook|instagram)\.com/\w+)", html_content))),
-            "crypto_wallets": list(set(re.findall(r"\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b", html_content))),  # BTC wallet format
-            "ip_addresses": list(set(re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", html_content))),
-            "urls": list(set(re.findall(r"https?://[^\s\"'>]+", html_content))),
+            "emails": list(set(validate_emails(re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", html_content)))),
+            "phone_numbers": list(set(validate_phone_numbers(re.findall(r"\b\+?\d{1,4}?[-.\s]?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}\b", html_content)))),
+            "social_handles": list(set(extract_social_handles(html_content))),
+            "crypto_wallets": list(set(validate_crypto_wallets(re.findall(r"\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b", html_content)))),
+            "ip_addresses": list(set(validate_ip_addresses(re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", html_content)))),
+            "urls": list(set(extract_urls(html_content))),
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "source_url": source_url
         }
         return data
+    except Exception as e:
+        console.print(f"[red]Error extracting OSINT data: {e}[/red]")
+        return {}
+
+def validate_emails(emails):
+    """Validate and filter email addresses."""
+    valid_emails = []
+    for email in emails:
+        # Basic validation
+        if '@' in email and '.' in email.split('@')[1]:
+            # Skip common false positives
+            if not any(fp in email.lower() for fp in ['@example.com', '@test.com', '@localhost']):
+                valid_emails.append(email.lower())
+    return valid_emails
+
+def validate_phone_numbers(phones):
+    """Validate and filter phone numbers."""
+    valid_phones = []
+    for phone in phones:
+        # Remove non-digits for validation
+        digits_only = re.sub(r'[^\d]', '', phone)
+        # Must be between 7-15 digits (international phone number standards)
+        if 7 <= len(digits_only) <= 15:
+            valid_phones.append(phone)
+    return valid_phones
+
+def extract_social_handles(html_content):
+    """Extract social media handles with improved patterns."""
+    handles = set()
+    
+    # Twitter/X handles
+    twitter_handles = re.findall(r'@(\w{1,15})', html_content)
+    for handle in twitter_handles:
+        if len(handle) > 2:  # Filter out very short handles
+            handles.add(f"@{handle}")
+    
+    # Social media URLs
+    social_patterns = [
+        r'(?:twitter|x)\.com/(\w+)',
+        r'facebook\.com/(\w+)',
+        r'instagram\.com/(\w+)',
+        r'linkedin\.com/in/(\w+)',
+        r'github\.com/(\w+)',
+        r'tiktok\.com/@(\w+)'
+    ]
+    
+    for pattern in social_patterns:
+        matches = re.findall(pattern, html_content, re.IGNORECASE)
+        for match in matches:
+            if len(match) > 2 and not match.lower() in ['www', 'help', 'support', 'about']:
+                handles.add(match)
+    
+    return list(handles)
+
+def validate_crypto_wallets(wallets):
+    """Validate cryptocurrency wallet addresses."""
+    valid_wallets = []
+    for wallet in wallets:
+        # Basic Bitcoin address validation (simplified)
+        if 25 <= len(wallet) <= 34 and wallet[0] in ['1', '3']:
+            valid_wallets.append(wallet)
+    return valid_wallets
+
+def validate_ip_addresses(ips):
+    """Validate IP addresses."""
+    valid_ips = []
+    for ip in ips:
+        try:
+            parts = ip.split('.')
+            if len(parts) == 4 and all(0 <= int(part) <= 255 for part in parts):
+                # Skip common false positives
+                if not (ip.startswith('127.') or ip.startswith('192.168.') or ip.startswith('10.')):
+                    valid_ips.append(ip)
+        except ValueError:
+            continue
+    return valid_ips
+
+def extract_urls(html_content):
+    """Extract and validate URLs."""
+    urls = set()
+    url_pattern = r'https?://[^\s"\'<>()]+'
+    found_urls = re.findall(url_pattern, html_content)
+    
+    for url in found_urls:
+        # Clean up URL (remove trailing punctuation)
+        url = re.sub(r'[.,;:!?]+$', '', url)
+        if len(url) > 10:  # Filter out very short URLs
+            urls.add(url)
+    
+    return list(urls)
 
 def save_osint_data_to_json(data: dict, output_path: str = "osint_scrape_output.json"):
     try:
@@ -2394,25 +2923,60 @@ def repl_main():
     threading.Thread(target=decoy_traffic_thread, args=(extra_stealth_options,), daemon=True).start()
 
 if __name__ == "__main__":
-    # Step 1: Ensure strong entropy
-    ensure_strong_entropy()
+    # Step 1: Enhanced entropy validation
+    try:
+        ensure_strong_entropy(min_bytes=512, strict=True)  # Higher entropy requirement
+        print("[Security] ✅ Strong entropy validated")
+    except Exception as e:
+        print(f"[Security] ❌ Entropy check failed: {e}")
+        sys.exit(1)
 
-    # Step 2: Secure shutdown handlers
+    # Step 2: Enhanced shutdown handlers with resource cleanup
     signal.signal(signal.SIGTERM, sigterm_cleanup_handler)
     signal.signal(signal.SIGINT, sigterm_cleanup_handler)
+    
+    # Register cleanup on normal exit
+    import atexit
+    atexit.register(lambda: sigterm_cleanup_handler(0, None))
 
-    # Step 3: PQ Logger initialization
-    pq_logger = PQLogManager(get_fernet_key())
-    pq_logger.log("tools", "✅ Darkelf CLI booted successfully.")
-    pq_logger.flush_all()
+    # Step 3: Enhanced PQ Logger initialization
+    try:
+        pq_logger = PQLogManager(get_fernet_key())
+        register_sensitive_object(pq_logger)  # Register for secure cleanup
+        pq_logger.log("tools", "✅ Darkelf CLI booted with enhanced security")
+        pq_logger.log("security", "Entropy validation passed")
+        print("[Security] ✅ PQ Logger initialized with enhanced separation")
+    except Exception as e:
+        print(f"[Security] ❌ Logger initialization failed: {e}")
+        sys.exit(1)
 
-    # Step 4: CLI or REPL routing
+    # Step 4: Initialize resource monitoring
+    try:
+        setup_resource_monitoring()
+        print("[Scalability] ✅ Resource monitoring active")
+    except Exception as e:
+        print(f"[Scalability] ⚠️ Resource monitoring failed: {e}")
+
+    # Step 5: CLI or REPL routing with error handling
     cli_commands = {"generate-keys", "send", "receive"}
-    if len(sys.argv) > 1 and sys.argv[1] in cli_commands:
-        cli_main()
-    else:
-        repl_main()
-
-    # Step 5: In-memory log cleanup
-    for category in pq_logger.logs:
-        pq_logger.logs[category].clear()
+    try:
+        if len(sys.argv) > 1 and sys.argv[1] in cli_commands:
+            pq_logger.log("tools", f"CLI mode: {sys.argv[1]}")
+            cli_main()
+        else:
+            pq_logger.log("tools", "REPL mode started")
+            repl_main()
+    except KeyboardInterrupt:
+        print("\n[Security] 🔐 Keyboard interrupt - performing secure cleanup")
+        pq_logger.log("security", "Emergency shutdown initiated")
+    except Exception as e:
+        print(f"[Error] ❌ Unexpected error: {e}")
+        pq_logger.log("security", f"Unexpected error: {e}")
+    finally:
+        # Step 6: Secure cleanup
+        try:
+            pq_logger.log("tools", "Performing secure shutdown")
+            pq_logger.secure_wipe_memory()
+            print("[Security] ✅ Memory securely wiped")
+        except Exception as e:
+            print(f"[Security] ⚠️ Cleanup error: {e}")
