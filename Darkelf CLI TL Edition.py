@@ -80,6 +80,8 @@ import re
 import ssl
 import signal
 import tls_client
+import html
+from urllib.parse import quote_plus
 from collections import deque
 from typing import Optional, List, Dict
 from datetime import datetime
@@ -1252,7 +1254,7 @@ def onion_discovery(keywords, extra_stealth_options=None):
 TOOLS = [
     "sherlock", "shodan", "recon-ng", "theharvester", "nmap", "yt-dlp",
     "maltego", "masscan", "amass", "subfinder", "exiftool", "mat2",
-    "neomutt", "dnstwist", "gitleaks", "httpx", "p0f", "thunderbird"
+    "neomutt", "dnstwist", "gitleaks", "httpx", "p0f", "ollama", "phoneinfoga", "thunderbird"
 ]
 
 def open_tool(tool):
@@ -1312,62 +1314,99 @@ end tell'''
         console.print(f"❌ Failed to open tool '{tool}': {e}")
         
 def print_help():
-    console.print("Darkelf CLI Browser — Command Reference\n")
+    console.print("[bold cyan]Darkelf CLI Browser — Command Reference[/bold cyan]\n")
     console.print("Select by and type full command:\n")
 
-    commands = [
-        ("search <keywords>",     "Search DuckDuckGo (onion)"),
-        ("duck",                  "Open DuckDuckGo homepage (onion)"),
-        ("debug <keywords>",      "Search and show full debug info"),
-        ("stealth",               "Toggle extra stealth options"),
-        ("genkeys",               "Generate post-quantum keys"),
-        ("sendmsg",               "Encrypt & send a message"),
-        ("recvmsg",               "Decrypt & show received message"),
-        ("tornew",                "Request new Tor circuit (if supported)"),
-        ("findonions <keywords>", "Discover .onion services by keywords"),
-        ("tool <name>",           "Install and launch a terminal tool"),
-        ("tools",                 "List available terminal tools"),
-        ("toolinfo",              "Show descriptions of each tool"),
-        ("browser",               "Launch Darkelf CLI Browser"),
-        ("wipe",                  "Self-destruct and wipe sensitive files"),
-        ("checkip",               "Verify you're routed through Tor"),
-        ("tlsstatus",             "Show recent TLS Monitor activity"),
-        ("beacon <.onion>",       "Check if a .onion site is reachable via Tor"),
-        ("help",                  "Show this help menu"),
-        ("osintscan <term|url>",  "Fetch a URL & extract emails, phones, etc."),
-        ("exit",                  "Exit the browser")
+    categories = [
+        ("General OSINT and Searching", [
+            ("search <keywords>",     "Search DuckDuckGo (onion)"),
+            ("debug <keywords>",      "Search and show full debug info"),
+            ("osintscan <term|url>",  "Fetch a URL & extract emails, phones, etc."),
+            ("findonions <keywords>", "Discover .onion services by keywords")
+        ]),
+
+        ("Security and Privacy Tools", [
+            ("stealth",               "Toggle extra stealth options"),
+            ("genkeys",               "Generate post-quantum keys"),
+            ("sendmsg",               "Encrypt & send a message"),
+            ("recvmsg",               "Decrypt & show received message"),
+            ("tornew",                "Request new Tor circuit (if supported)"),
+            ("checkip",               "Verify you're routed through Tor"),
+            ("tlsstatus",             "Show recent TLS Monitor activity"),
+            ("beacon <.onion>",       "Check if a .onion site is reachable via Tor")
+        ]),
+
+        ("Tools and Utilities", [
+            ("tool <name>",           "Install and launch a terminal tool"),
+            ("tools",                 "List available terminal tools"),
+            ("toolinfo",              "Show categorized descriptions of each tool"),
+            ("browser",               "Launch Darkelf CLI Browser")
+        ]),
+
+        ("Maintenance", [
+            ("wipe",                  "Self-destruct and wipe sensitive files"),
+            ("help",                  "Show this help menu"),
+            ("exit",                  "Exit the browser")
+        ])
     ]
 
-    for idx, (cmd, desc) in enumerate(commands, start=1):
-        console.print(f"  {idx:>2}. {cmd:<24} — {desc}")
-        
-def print_toolinfo():
-    tool_descriptions = {
-        "sherlock": "Find usernames across social networks",
-        "shodan": "Search engine for internet-connected devices",
-        "recon-ng": "Web recon framework with modules",
-        "theharvester": "Collect emails, domains, hosts",
-        "nmap": "Port scanner and network mapper",
-        "yt-dlp": "Download videos from YouTube and more",
-        "maltego": "Graphical link analysis tool",
-        "masscan": "Internet-scale port scanner",
-        "amass": "Subdomain discovery and asset mapping",
-        "subfinder": "Passive subdomain discovery",
-        "exiftool": "Read and write file metadata",
-        "mat2": "Metadata anonymization toolkit",
-        "neomutt": "Command-line email client",
-        "dnstwist": "Find typo-squatting/phishing domains",
-        "gitleaks": "Scan repos for secrets and keys",
-        "httpx": "HTTP toolkit for probing web services",
-        "p0f": "Passive OS fingerprinting tool",
-        "thunderbird": "Secure GUI email client"
-    }
+    idx = 1
+    for section, items in categories:
+        console.print(f"\n[bold yellow]{section}[/bold yellow]")
+        for cmd, desc in items:
+            console.print(f"  {idx:>2}. {cmd:<24} — {desc}")
+            idx += 1
 
-    console.print("\nTool Descriptions:\n")
-    for i, (tool, desc) in enumerate(tool_descriptions.items(), start=1):
-        console.print(f"  {i:>2}. {tool:<12} — {desc}")
-    console.print()
-    
+def print_toolinfo():
+    tool_categories = [
+        ("Social & Username Recon", {
+            "sherlock": "Find usernames across social networks",
+            "recon-ng": "Web recon framework with modules"
+        }),
+
+        ("Network Scanning & OSINT", {
+            "shodan": "Search engine for internet-connected devices",
+            "theharvester": "Collect emails, domains, hosts",
+            "masscan": "Internet-scale port scanner",
+            "nmap": "Port scanner and network mapper",
+            "httpx": "HTTP toolkit for probing web services",
+            "p0f": "Passive OS fingerprinting tool",
+            "amass": "Subdomain discovery and asset mapping",
+            "subfinder": "Passive subdomain discovery"
+        }),
+
+        ("Metadata & Privacy", {
+            "exiftool": "Read and write file metadata",
+            "mat2": "Metadata anonymization toolkit"
+        }),
+
+        ("Communications", {
+            "neomutt": "Command-line email client",
+            "thunderbird": "Secure GUI email client"
+        }),
+
+        ("Threat Intelligence", {
+            "dnstwist": "Find typo-squatting/phishing domains",
+            "gitleaks": "Scan repos for secrets and keys",
+            "maltego": "Graphical link analysis tool"
+        }),
+
+        ("Media Tools", {
+            "yt-dlp": "Download videos from YouTube and more"
+        }),
+
+        ("Phone and AI", {
+            "phoneinfoga": "Advanced information gathering tool for phone numbers",
+            "ollama": "Run local LLMs (AI) via the Ollama API"
+        })
+    ]
+
+    console.print("[bold cyan]\nAvailable OSINT Tools by Category:[/bold cyan]")
+    for title, tools in tool_categories:
+        console.print(f"\n[bold yellow]{title}[/bold yellow]")
+        for name, desc in tools.items():
+            console.print(f"  [magenta]{name:<16}[/magenta] — {desc}")
+
 def print_tools_help():
     console.print("Tools CLI Usage:")
     console.print("  tool <number>     — Install and launch the selected terminal tool\n")
@@ -1784,14 +1823,56 @@ class DarkelfUtils:
                 console.print(f"[⚠] Onion responded with status {r.status_code}")
         except Exception as e:
             console.print(f"[🚫] Failed to reach onion service: {e}")
-            
+
+# Assume console, USER_AGENTS, DUCKDUCKGO_LITE, get_tor_proxy, fetch_with_requests are defined globally
+
+def run_phoneinfoga_scan(number: str):
+    console.print(f"[cyan]📾 Running PhoneInfoga on:[/cyan] [bold]{number}[/bold]")
+    try:
+        result = subprocess.run(
+            ["phoneinfoga", "scan", "-n", number],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode == 0:
+            console.print(f"[green]✔ PhoneInfoga result:[/green]\n{result.stdout}")
+        else:
+            console.print(f"[red]✖ PhoneInfoga failed:[/red] {result.stderr}")
+    except Exception as e:
+        console.print(f"[red]⚠ Error running PhoneInfoga:[/red] {e}")
+
+def run_theharvester_scan(target: str):
+    console.print(f"[cyan]📧 Running theHarvester on:[/cyan] [bold]{target}[/bold]")
+    try:
+        result = subprocess.run(
+            ["theHarvester", "-d", target, "-b", "all"],
+            capture_output=True, text=True, timeout=90
+        )
+        if result.returncode == 0:
+            console.print(f"[green]✔ theHarvester result:[/green]\n{result.stdout}")
+        else:
+            console.print(f"[red]✖ theHarvester failed:[/red] {result.stderr}")
+    except Exception as e:
+        console.print(f"[red]⚠ Error running theHarvester:[/red] {e}")
+
+def run_sherlock_scan(username: str):
+    console.print(f"[cyan]🕵️ Running Sherlock on:[/cyan] [bold]{username}[/bold]")
+    try:
+        result = subprocess.run(
+            ["sherlock", username],
+            capture_output=True, text=True, timeout=120
+        )
+        if result.returncode == 0:
+            console.print(f"[green]✔ Sherlock result:[/green]\n{result.stdout}")
+        else:
+            console.print(f"[red]✖ Sherlock failed:[/red] {result.stderr}")
+    except Exception as e:
+        console.print(f"[red]⚠ Error running Sherlock:[/red] {e}")
+
 def osintscan(query):
-    import html
     headers = {'User-Agent': random.choice(USER_AGENTS)}
     proxies = {'http': get_tor_proxy(), 'https': get_tor_proxy()}
     url = DUCKDUCKGO_LITE + f"?q={quote_plus(query)}"
 
-    # --- Detect type ---
     is_email = bool(re.match(r"^[^@]+@[^@]+\.[^@]+$", query))
     is_phone = bool(re.match(r"^\+?\d[\d\s\-().]{6,}$", query))
     is_username = bool(re.match(r"^@?[a-zA-Z0-9_.-]{3,32}$", query)) and not is_email and not is_phone
@@ -1800,10 +1881,10 @@ def osintscan(query):
     phone = re.sub(r"[^\d]", "", query) if is_phone else None
     email = query if is_email else None
 
-    # --- Direct links to locations ---
     direct_links = []
 
     if is_username:
+        run_sherlock_scan(username)
         platforms = {
             "Twitter": f"https://twitter.com/{username}",
             "GitHub": f"https://github.com/{username}",
@@ -1817,6 +1898,9 @@ def osintscan(query):
         direct_links = [(site, link) for site, link in platforms.items()]
 
     elif is_email:
+        domain_match = re.search(r"@(.+)", email)
+        if domain_match:
+            run_theharvester_scan(domain_match.group(1))
         platforms = {
             "Google Search": f"https://www.google.com/search?q={quote_plus(email)}",
             "HaveIBeenPwned": f"https://haveibeenpwned.com/unifiedsearch/{quote_plus(email)}",
@@ -1830,23 +1914,22 @@ def osintscan(query):
         direct_links = [(site, link) for site, link in platforms.items()]
 
     elif is_phone:
+        run_phoneinfoga_scan(query)
         platforms = {
             "Google Search": f"https://www.google.com/search?q={quote_plus(query)}",
             "Sync.me": f"https://sync.me/search/?number={phone}",
-            "TrueCaller": f"https://www.truecaller.com/search/{phone[:2]}/{phone}", # Assumes country code present
+            "TrueCaller": f"https://www.truecaller.com/search/{phone[:2]}/{phone}",
             "Facebook Search": f"https://www.facebook.com/search/top/?q={quote_plus(query)}",
             "Twitter Search": f"https://twitter.com/search?q={quote_plus(query)}",
             "DuckDuckGo": f"https://duckduckgo.com/?q={quote_plus(query)}"
         }
         direct_links = [(site, link) for site, link in platforms.items()]
 
-    # --- Print direct links if found ---
     if direct_links:
         console.print(f"\n[cyan]🔗 Direct OSINT links for query:[/cyan] [bold]{query}[/bold]")
         for site, link in direct_links:
             console.print(f"   [magenta]{site}:[/magenta] [green]{link}[/green]")
 
-    # --- Standard DDG/Onion scraping as before ---
     try:
         response = requests.get(url, headers=headers, proxies=proxies, timeout=20)
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -1871,23 +1954,21 @@ def osintscan(query):
             for txt, link in results:
                 console.print(f"   [green]{link}[/green] ({txt})")
 
-        # Add direct links to scan list for OSINT, but don't scan Google.com etc.
         scan_urls = [u for _, u in results]
         if direct_links:
-            # Only scan social URLs, not search engine links
             scan_urls += [link for site, link in direct_links if not any(s in site.lower() for s in ["search", "google", "duckduckgo"])]
 
-        # OSINT extraction
         all_data = {
             "emails": set(),
             "phone_numbers": set(),
             "social_handles": set(),
             "crypto_wallets": set(),
-            "ip_addresses": set(),
             "urls": set(),
         }
+
         for u in scan_urls:
             all_data["urls"].add(u)
+
         for u in scan_urls[:5]:
             console.print(f"[blue]→ Scanning:[/blue] {u}")
             try:
@@ -1898,7 +1979,6 @@ def osintscan(query):
             except Exception as e:
                 console.print(f"[red]  Failed to fetch or parse {u}: {e}[/red]")
 
-        # Show summary
         console.print("\n[yellow bold]📊 OSINT Summary:[/yellow bold]")
         for key, values in all_data.items():
             if values:
@@ -1910,21 +1990,18 @@ def osintscan(query):
 
     except Exception as e:
         console.print(f"[red]OSINT scan failed: {e}[/red]")
-        
-# --- OSINT Scanning Integration ---
-def extract_osint_data(html_content: str, source_url: str = "(unknown)") -> dict:
 
-        data = {
-            "emails": list(set(re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", html_content))),
-            "phone_numbers": list(set(re.findall(r"\b\+?\d{1,4}?[-.\s]?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}\b", html_content))),
-            "social_handles": list(set(re.findall(r"(?:@\w{2,}|(?:twitter|facebook|instagram)\.com/\w+)", html_content))),
-            "crypto_wallets": list(set(re.findall(r"\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b", html_content))),  # BTC wallet format
-            "ip_addresses": list(set(re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", html_content))),
-            "urls": list(set(re.findall(r"https?://[^\s\"'>]+", html_content))),
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "source_url": source_url
-        }
-        return data
+def extract_osint_data(html_content: str, source_url: str = "(unknown)") -> dict:
+    data = {
+        "emails": list(set(re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", html_content))),
+        "phone_numbers": list(set(re.findall(r"\b\+?\d{1,4}?[-.\s]?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}\b", html_content))),
+        "social_handles": list(set(re.findall(r"(?:@\w{2,}|(?:twitter|facebook|instagram)\.com/\w+)", html_content))),
+        "crypto_wallets": list(set(re.findall(r"\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b", html_content))),
+        "urls": list(set(re.findall(r"https?://[^\s\"'>]+", html_content))),
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "source_url": source_url
+    }
+    return data
 
 def save_osint_data_to_json(data: dict, output_path: str = "osint_scrape_output.json"):
     try:
