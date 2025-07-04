@@ -107,6 +107,66 @@ from stem.control import Controller
 from stem import Signal as StemSignal
 from stem import process as stem_process
 
+# === Stealth, Threat Detection, In-Memory Logging ===
+# Known tracker hashes (SHA256-obfuscated)
+
+STEALTH_MODE = True  # or True, depending on context
+
+def in_stealth():
+    return STEALTH_MODE
+
+KNOWN_TRACKER_HASHES = {
+    hashlib.sha256(domain.encode()).hexdigest() for domain in [
+        "google-analytics.com",
+        "doubleclick.net",
+        "facebook.net",
+        "hotjar.com",
+        "cloudflareinsights.com"
+    ]
+}
+
+# In-memory ephemeral log
+in_memory_log = []
+
+def log_ephemeral(url):
+    hashed = hashlib.sha256(url.encode()).hexdigest()
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    in_memory_log.append((timestamp, hashed))
+
+def wipe_memory_log():
+    in_memory_log.clear()
+
+def threat_score(url):
+    parsed = urlparse(url)
+    score = 0
+    if parsed.port and parsed.port not in [80, 443, 8080]:
+        score += 2
+    if re.search(r"(tracking|analytics|ads|beacon)", parsed.netloc):
+        score += 3
+    if parsed.netloc.endswith((".xyz", ".top", ".click", ".gdn", ".live")):
+        score += 1
+    hashed_domain = hashlib.sha256(parsed.netloc.encode()).hexdigest()
+    if hashed_domain in KNOWN_TRACKER_HASHES:
+        print("⚠️  Tracker domain detected:", parsed.netloc)
+        score += 5
+    return score
+
+def check_dns_leak(test_domain="dnsleaktest.com"):
+    try:
+        ip = socket.gethostbyname(test_domain)
+        if ip:
+            print(f"[DNS OK] {test_domain} resolved to {ip}")
+    except Exception as e:
+        print("[DNS Leak Check] Error:", e)
+
+def analyze_connection(url):
+    if in_stealth():
+        return
+    score = threat_score(url)
+    if score >= 5:
+        print(f"[THREAT] {url} scored {score}/10 on threat scale.")
+    log_ephemeral(url)
+
 def setup_logging():
     # Disable specific library loggers
     logging.getLogger('stem').disabled = True
@@ -1118,6 +1178,17 @@ def check_my_ip():
         console.print(f"⚠️ Failed to verify Tor status: {e}")
 
 def fetch_and_display(url, session=None, extra_stealth_options=None, debug=True):
+    parsed = urlparse(url)
+    hashed_domain = hashlib.sha256(parsed.netloc.encode()).hexdigest()
+
+    if hashed_domain in KNOWN_TRACKER_HASHES:
+        console.print(f"⛔ Blocked tracker domain: {parsed.netloc}")
+        return
+
+    if re.search(r"(tracking|analytics|ads|beacon)", parsed.netloc):
+        console.print(f"⛔ Blocked suspicious tracker domain pattern: {parsed.netloc}")
+        return
+
     html, headers = fetch_with_requests(
         url,
         session=session,
@@ -1237,7 +1308,7 @@ def onion_discovery(keywords, extra_stealth_options=None):
     ahmia = "http://juhanurmihxlp77nkq76byazcldy2hlmovfu2epvl5ankdibsot4csyd.onion/search/?q=" + quote_plus(keywords)
     console.print(f"🌐 Discovering .onion services for: {keywords}")
     try:
-        html, _ = fetch_with_requests(ahmia, extra_stealth_options=extra_stealth_options, debug=True)
+        html, _ = fetch_with_requests(ahmia, extra_stealth_options=extra_stealth_options, debug=False)
         soup = BeautifulSoup(html, "html.parser")
         seen = set()
         for a in soup.find_all("a", href=True):
@@ -1333,7 +1404,10 @@ def print_help():
             ("tornew",                "Request new Tor circuit (if supported)"),
             ("checkip",               "Verify you're routed through Tor"),
             ("tlsstatus",             "Show recent TLS Monitor activity"),
-            ("beacon <.onion>",       "Check if a .onion site is reachable via Tor")
+            ("beacon <.onion>",       "Check if a .onion site is reachable via Tor"),
+            ("dnsleak",               "Run a dnsleak test"),
+            ("analyze! <url>",        "Analyze a URL for threat signals"),
+            ("open <url>",            "Open and fetch a full URL (tracker-safe)")
         ]),
 
         ("Tools and Utilities", [
@@ -1444,20 +1518,26 @@ def check_tls_status():
     except Exception as e:
         print(f"[!] Error checking TLS status: {e}")
 
-def cli_main():
+
+
+def cli_browser():
     setup_logging()
     parser = argparse.ArgumentParser(description="DarkelfMessenger: PQC CLI Messenger")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
     gen_parser = subparsers.add_parser("generate-keys", help="Generate a PQ keypair.")
     gen_parser.add_argument("--pub", default="my_pubkey.bin", help="Path for public key output.")
     gen_parser.add_argument("--priv", default="my_privkey.bin", help="Path for private key output.")
+
     send_parser = subparsers.add_parser("send", help="Send an encrypted message.")
     send_parser.add_argument("--pub", required=True, help="Recipient's public key path.")
     send_parser.add_argument("--msg", required=True, help="Message text to send.")
     send_parser.add_argument("--out", default="msg.dat", help="Output file for encrypted message.")
+
     recv_parser = subparsers.add_parser("receive", help="Receive/decrypt a message.")
     recv_parser.add_argument("--priv", default="my_privkey.bin", help="Path to your private key.")
     recv_parser.add_argument("--msgfile", default="msg.dat", help="Encrypted message file.")
+
     args = parser.parse_args()
     messenger = DarkelfMessenger()
     if args.command == "generate-keys":
@@ -2355,6 +2435,21 @@ def repl_main():
                 utils.beacon_onion_service(onion)
                 print()
                 
+            elif cmd == "dnsleak":
+                check_dns_leak()
+                print()
+                
+            elif cmd.startswith("analyze! "):  # exclamation = force
+                url = cmd.split(" ", 1)[1].strip()
+                score = threat_score(url)
+                if score >= 5:
+                    print(f"[THREAT] {url} scored {score}/10 on threat scale.")
+                    
+            elif cmd.startswith("open "):
+                url = cmd.split(" ", 1)[1].strip()
+                fetch_and_display(url)
+                print()
+
             elif cmd == "tools":
                 print_tools_help()
                 print()
