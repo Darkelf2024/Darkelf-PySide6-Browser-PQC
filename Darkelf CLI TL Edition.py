@@ -81,6 +81,7 @@ import ssl
 import signal
 import tls_client
 import html
+import ipaddress
 from urllib.parse import quote_plus
 from collections import deque
 from typing import Optional, List, Dict
@@ -91,6 +92,7 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.rule import Rule
 from rich.align import Align
+from rich.table import Table
 from urllib.parse import quote_plus, unquote, parse_qs, urlparse
 from bs4 import BeautifulSoup
 from oqs import KeyEncapsulation
@@ -106,6 +108,128 @@ from stem.connection import authenticate_cookie
 from stem.control import Controller
 from stem import Signal as StemSignal
 from stem import process as stem_process
+
+
+# === FontManager: Stealth Obfuscation and Styling ===
+class FontManager:
+    def __init__(self, stealth_mode=True, randomize=True):
+        self.stealth_mode = stealth_mode
+        self.randomize = randomize
+        self.console = Console()
+
+        self.fullwidth = {chr(i): chr(0xFF21 + i - 65) for i in range(65, 91)}
+        self.styles = [
+            "bold green", "bold cyan", "bold yellow",
+            "italic magenta", "bold blue", "italic green"
+        ]
+
+    def obfuscate(self, text):
+        return ''.join(self.fullwidth.get(c.upper(), c) for c in text)
+
+    def stylize(self, text):
+        styled = Text()
+        for char in text:
+            style = random.choice(self.styles) if self.randomize else "bold"
+            styled.append(char, style=style)
+        return styled
+
+    def print(self, text):
+        if self.stealth_mode:
+            text = self.obfuscate(text)
+        if self.randomize:
+            self.console.print(self.stylize(text))
+        else:
+            self.console.print(text)
+
+# === Initialize global FontManager instance ===
+console = Console()
+font = FontManager(stealth_mode=True, randomize=True)
+
+# Example usage:
+font.print("Darkelf CLI — Secure Terminal Loaded")
+
+class IPLookup:
+    def __init__(self, use_tor=False, timeout=10):
+        self.console = Console()
+        self.timeout = timeout
+        self.use_tor = use_tor
+        self.api_url_primary = "http://ip-api.com/json/{}"
+        self.api_url_fallback = "https://ipwho.is/{}"
+        self.proxies = {
+            "http": "socks5h://127.0.0.1:9052",
+            "https": "socks5h://127.0.0.1:9052"
+        } if use_tor else None
+
+    def is_valid_ip(self, ip):
+        try:
+            ipaddress.ip_address(ip)
+            return True
+        except ValueError:
+            return False
+
+    def get_public_ip(self):
+        try:
+            r = requests.get("https://api.ipify.org", timeout=self.timeout, proxies=self.proxies)
+            return r.text.strip()
+        except Exception as e:
+            self.console.print(f"[red]Failed to fetch public IP: {e}[/red]")
+            return None
+
+    def lookup(self, ip=""):
+        target_ip = ip.strip() if ip else self.get_public_ip()
+        if not target_ip:
+            return
+
+        if not self.is_valid_ip(target_ip):
+            self.console.print(f"[red]Invalid IP format: {target_ip}[/red]")
+            return
+
+        # Try primary API
+        try:
+            r = requests.get(self.api_url_primary.format(target_ip), timeout=self.timeout, proxies=self.proxies)
+            if r.status_code == 429:
+                self.console.print("[yellow]Rate limit exceeded on ip-api.com. Trying fallback...[/yellow]")
+                return self._lookup_fallback(target_ip)
+
+            data = r.json()
+            if data.get("status") != "success":
+                self.console.print(f"[yellow]Primary API failed: {data.get('message', 'unknown error')}[/yellow]")
+                return self._lookup_fallback(target_ip)
+
+            self._print_table(data, source="ip-api.com")
+        except Exception as e:
+            self.console.print(f"[yellow]Primary API error: {e} — trying fallback...[/yellow]")
+            self._lookup_fallback(target_ip)
+
+    def _lookup_fallback(self, ip):
+        try:
+            r = requests.get(self.api_url_fallback.format(ip), timeout=self.timeout, proxies=self.proxies)
+            data = r.json()
+            if not data.get("success", False):
+                self.console.print(f"[red]Fallback lookup failed for {ip}: {data.get('message', 'unknown error')}[/red]")
+                return
+
+            self._print_table(data, source="ipwho.is")
+        except Exception as e:
+            self.console.print(f"[red]Fallback API error: {e}[/red]")
+
+    def _print_table(self, data, source="ip-api.com"):
+        table = Table(title=f"IP Lookup for {data.get('ip', data.get('query', 'Unknown'))} [dim](via {source})[/dim]")
+        fields = {
+            "IP": data.get("ip") or data.get("query"),
+            "Country": data.get("country") or data.get("country_name"),
+            "Region": data.get("regionName") or data.get("region"),
+            "City": data.get("city"),
+            "ISP": data.get("isp") or data.get("connection", {}).get("isp"),
+            "Org": data.get("org") or data.get("connection", {}).get("org"),
+            "ASN": data.get("as") or data.get("connection", {}).get("asn"),
+            "Timezone": data.get("timezone"),
+            "Latitude": str(data.get("lat")),
+            "Longitude": str(data.get("lon")),
+        }
+        for key, val in fields.items():
+            table.add_row(key, str(val or "N/A"))
+        self.console.print(table)
 
 # === Stealth, Threat Detection, In-Memory Logging ===
 # Known tracker hashes (SHA256-obfuscated)
@@ -1403,6 +1527,7 @@ def print_help():
             ("recvmsg",               "Decrypt & show received message"),
             ("tornew",                "Request new Tor circuit (if supported)"),
             ("checkip",               "Verify you're routed through Tor"),
+            ("iplookup <ip>",         "Lookup IP address info"),
             ("tlsstatus",             "Show recent TLS Monitor activity"),
             ("beacon <.onion>",       "Check if a .onion site is reachable via Tor"),
             ("dnsleak",               "Run a dnsleak test"),
@@ -2434,7 +2559,13 @@ def repl_main():
                 onion = cmd.split(" ", 1)[1]
                 utils.beacon_onion_service(onion)
                 print()
-                
+
+            elif cmd.startswith("iplookup"):
+                parts = cmd.split()
+                ip = parts[1] if len(parts) > 1 else ""
+                IPLookup(use_tor=True).lookup(ip)
+                print()
+
             elif cmd == "dnsleak":
                 check_dns_leak()
                 print()
