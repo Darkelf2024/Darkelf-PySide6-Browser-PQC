@@ -95,7 +95,7 @@ Type `help` for a list of commands.
 
 ## Dependencies
 
-- **Python 3.8+**
+- **Python 3.11+**
 - **Tor** (`tor`, `obfs4proxy`)
 - **Python packages:**  
   `stem`, `requests`, `beautifulsoup4`, `psutil`, `rich`, `cryptography`, `pycryptodome`, `pyopenssl`, `tls-client`, `py-oqs`
