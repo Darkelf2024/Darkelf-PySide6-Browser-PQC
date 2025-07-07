@@ -82,6 +82,7 @@ import signal
 import tls_client
 import html
 import ipaddress
+import dns.resolver
 from urllib.parse import quote_plus
 from collections import deque
 from typing import Optional, List, Dict
@@ -109,6 +110,143 @@ from stem.control import Controller
 from stem import Signal as StemSignal
 from stem import process as stem_process
 
+def get_tor_session():
+    session = requests.Session()
+    session.proxies = {
+        "http": "socks5h://127.0.0.1:9050",
+        "https": "socks5h://127.0.0.1:9050",
+    }
+    return session
+
+class EmailIntelPro:
+    DISPOSABLE_DOMAINS = {
+        "mailinator.com", "10minutemail.com", "tempmail.com", "guerrillamail.com",
+        "getnada.com", "yopmail.com", "trashmail.com", "emailondeck.com"
+    }
+
+    def __init__(self, email, session=None):
+        self.console = Console()
+        self.email = email
+        self.session = session or get_tor_session()  # ✅ Ensure TOR routing
+        self.domain = self.get_domain()
+        self.prefix = self.get_prefix()
+        self.mx_records = []
+        self.txt_records = []
+        self.disposable = False
+        self.creation_date = "Unknown"
+        self.breached = "Unknown"
+        self.breach_url = None
+        self.gravatar = False
+        self.score = 0
+
+    def is_valid_email(self):
+        return re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", self.email)
+
+    def get_domain(self):
+        return self.email.split('@')[1].lower()
+
+    def get_prefix(self):
+        return self.email.split('@')[0]
+
+    def fetch_mx_records(self):
+        try:
+            answers = dns.resolver.resolve(self.domain, 'MX')
+            self.mx_records = sorted([str(r.exchange).rstrip('.') for r in answers])
+        except:
+            self.mx_records = []
+
+    def fetch_txt_records(self):
+        try:
+            answers = dns.resolver.resolve(self.domain, 'TXT')
+            self.txt_records = [r.to_text().strip('"') for r in answers]
+        except:
+            self.txt_records = []
+
+    def check_disposable(self):
+        self.disposable = self.domain in self.DISPOSABLE_DOMAINS
+
+    def check_rdap(self):
+        try:
+            res = self.session.get(f"https://rdap.org/domain/{self.domain}", timeout=10)
+            if res.ok:
+                data = res.json()
+                for event in data.get("events", []):
+                    if event.get("eventAction") == "registration":
+                        self.creation_date = event.get("eventDate", "Unknown")
+        except:
+            self.creation_date = "Unknown"
+
+    def check_breach(self):
+        try:
+            res = self.session.get(f"https://haveibeenpwned.com/unifiedsearch/{self.email}",
+                                   headers={"User-Agent": "DarkelfCLI"})
+            if res.status_code == 200:
+                self.breached = "Yes"
+                self.breach_url = res.url
+            elif res.status_code == 404:
+                self.breached = "No"
+        except:
+            self.breached = "Unknown"
+
+    def check_gravatar(self):
+        h = hashlib.md5(self.email.strip().lower().encode()).hexdigest()
+        url = f"https://www.gravatar.com/avatar/{h}?d=404"
+        try:
+            self.gravatar = self.session.get(url, timeout=5).status_code == 200
+        except:
+            self.gravatar = False
+
+    def calculate_score(self):
+        self.score = 0
+        self.score += 3 if self.disposable else 0
+        self.score += 2 if not self.mx_records else 0
+        self.score += 3 if self.breached == "Yes" else 0
+        self.score += 1 if self.creation_date == "Unknown" else 0
+        self.score += 1 if not self.gravatar else 0
+
+    def threat_label(self):
+        if self.score >= 7:
+            return "[red]HIGH[/red]"
+        elif self.score >= 4:
+            return "[yellow]MODERATE[/yellow]"
+        else:
+            return "[green]LOW[/green]"
+
+    def analyze(self):
+        if not self.is_valid_email():
+            self.console.print(f"[red]❌ Invalid email: {self.email}[/red]")
+            return
+
+        self.fetch_mx_records()
+        self.fetch_txt_records()
+        self.check_disposable()
+        self.check_rdap()
+        self.check_breach()
+        self.check_gravatar()
+        self.calculate_score()
+
+        table = Table(title=f"📧 Enhanced Email Intel for [bold]{self.email}[/bold]", show_lines=True)
+        table.add_column("Field", style="cyan")
+        table.add_column("Result", style="white")
+
+        table.add_row("Domain", self.domain)
+        table.add_row("MX Record", "✅ Found" if self.mx_records else "❌ None")
+        if self.mx_records:
+            table.add_row("MX Servers", "\n".join(self.mx_records))
+        table.add_row("Disposable Provider", "⚠️ Yes" if self.disposable else "✅ No")
+        table.add_row("Domain Creation", self.creation_date)
+        table.add_row("Gravatar Profile", "👤 Yes" if self.gravatar else "🙈 None")
+        table.add_row("Leaked in Breach", self.breached)
+        if self.breach_url:
+            table.add_row("Leak Details", self.breach_url)
+        table.add_row("TXT Records (SPF/DKIM)", "\n".join(self.txt_records[:3]) if self.txt_records else "❌ None")
+        table.add_row("Google Search", f"https://www.google.com/search?q=\"{self.email}\"")
+        table.add_row("GitHub Search", f"https://github.com/search?q={self.email}")
+        table.add_row("Pastebin Search", f"https://www.google.com/search?q={self.email}+site:pastebin.com")
+        table.add_row("Threat Score", f"{self.score}/10")
+        table.add_row("Threat Level", self.threat_label())
+
+        self.console.print(table)
 
 # === FontManager: Stealth Obfuscation and Styling ===
 class FontManager:
@@ -1532,7 +1670,8 @@ def print_help():
             ("beacon <.onion>",       "Check if a .onion site is reachable via Tor"),
             ("dnsleak",               "Run a dnsleak test"),
             ("analyze! <url>",        "Analyze a URL for threat signals"),
-            ("open <url>",            "Open and fetch a full URL (tracker-safe)")
+            ("open <url>",            "Open and fetch a full URL (tracker-safe)"),
+            ("emailintel",            "Lookup Email Information")
         ]),
 
         ("Tools and Utilities", [
@@ -2580,6 +2719,10 @@ def repl_main():
                 url = cmd.split(" ", 1)[1].strip()
                 fetch_and_display(url)
                 print()
+                
+            elif cmd.startswith("emailintel "):
+                target = cmd.split(" ", 1)[1].strip()
+                EmailIntelPro(target, session=get_tor_session()).analyze()
 
             elif cmd == "tools":
                 print_tools_help()
