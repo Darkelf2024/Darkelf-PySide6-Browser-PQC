@@ -101,6 +101,9 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from dotenv import load_dotenv
+from requests import Response
+from dotenv import load_dotenv
 import requests
 
 # --- Tor integration via Stem ---
@@ -117,6 +120,19 @@ def get_tor_session():
         "https": "socks5h://127.0.0.1:9052",
     }
     return session
+
+load_dotenv()  # Loads HIBP_API_KEY from .env if present
+
+LAST_REQUEST_TIME = 0
+REQUEST_INTERVAL = 1.6  # seconds (adjust based on API limits)
+
+def safe_get(session, url, **kwargs) -> Response:
+    global LAST_REQUEST_TIME
+    elapsed = time.time() - LAST_REQUEST_TIME
+    if elapsed < REQUEST_INTERVAL:
+        time.sleep(REQUEST_INTERVAL - elapsed)
+    LAST_REQUEST_TIME = time.time()
+    return session.get(url, **kwargs)
 
 class EmailIntelPro:
     DISPOSABLE_DOMAINS = {
@@ -178,14 +194,31 @@ class EmailIntelPro:
 
     def check_breach(self):
         try:
-            res = self.session.get(f"https://haveibeenpwned.com/unifiedsearch/{self.email}",
-                                   headers={"User-Agent": "DarkelfCLI"})
+            api_key = os.getenv("HIBP_API_KEY")
+            if not api_key:
+                self.console.print("[red]❌ HIBP API key not set. Please set HIBP_API_KEY in your environment or .env file.[/red]")
+                self.breached = "Unknown"
+                return
+
+            headers = {
+                "hibp-api-key": api_key,
+                "user-agent": "DarkelfCLI-TL-OSINT/1.0"
+            }
+
+            url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{self.email}?truncateResponse=true"
+            res = self.session.get(url, headers=headers, timeout=10)
+
             if res.status_code == 200:
                 self.breached = "Yes"
-                self.breach_url = res.url
+                self.breach_url = f"https://haveibeenpwned.com/account/{self.email}"
             elif res.status_code == 404:
                 self.breached = "No"
-        except:
+            else:
+                self.breached = "Unknown"
+
+            time.sleep(1.6)  # Respect free-tier API rate limit
+        except Exception as e:
+            self.console.print(f"[red]❌ Error checking HIBP breach: {e}[/red]")
             self.breached = "Unknown"
 
     def check_gravatar(self):
