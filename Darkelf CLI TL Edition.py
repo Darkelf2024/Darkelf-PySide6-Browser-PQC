@@ -2280,7 +2280,6 @@ def osintscan(query):
             run_theharvester_scan(domain_match.group(1))
         platforms = {
             "Google Search": f"https://www.google.com/search?q={quote_plus(email)}",
-            "HaveIBeenPwned": f"https://haveibeenpwned.com/unifiedsearch/{quote_plus(email)}",
             "Hunter.io": f"https://hunter.io/search/{quote_plus(email)}",
             "LinkedIn Search": f"https://www.linkedin.com/search/results/all/?keywords={quote_plus(email)}",
             "Twitter Search": f"https://twitter.com/search?q={quote_plus(email)}",
