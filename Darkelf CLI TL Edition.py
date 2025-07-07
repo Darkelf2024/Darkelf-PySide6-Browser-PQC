@@ -113,8 +113,8 @@ from stem import process as stem_process
 def get_tor_session():
     session = requests.Session()
     session.proxies = {
-        "http": "socks5h://127.0.0.1:9050",
-        "https": "socks5h://127.0.0.1:9050",
+        "http": "socks5h://127.0.0.1:9052",
+        "https": "socks5h://127.0.0.1:9052",
     }
     return session
 
