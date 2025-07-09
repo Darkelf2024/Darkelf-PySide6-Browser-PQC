@@ -94,6 +94,7 @@ from rich.text import Text
 from rich.rule import Rule
 from rich.align import Align
 from rich.table import Table
+from collections import defaultdict
 from urllib.parse import quote_plus, unquote, parse_qs, urlparse
 from bs4 import BeautifulSoup
 from oqs import KeyEncapsulation
@@ -192,35 +193,6 @@ class EmailIntelPro:
         except:
             self.creation_date = "Unknown"
 
-    def check_breach(self):
-        try:
-            api_key = os.getenv("HIBP_API_KEY")
-            if not api_key:
-                self.console.print("[red]❌ HIBP API key not set. Please set HIBP_API_KEY in your environment or .env file.[/red]")
-                self.breached = "Unknown"
-                return
-
-            headers = {
-                "hibp-api-key": api_key,
-                "user-agent": "DarkelfCLI-TL-OSINT/1.0"
-            }
-
-            url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{self.email}?truncateResponse=true"
-            res = self.session.get(url, headers=headers, timeout=10)
-
-            if res.status_code == 200:
-                self.breached = "Yes"
-                self.breach_url = f"https://haveibeenpwned.com/account/{self.email}"
-            elif res.status_code == 404:
-                self.breached = "No"
-            else:
-                self.breached = "Unknown"
-
-            time.sleep(1.6)  # Respect free-tier API rate limit
-        except Exception as e:
-            self.console.print(f"[red]❌ Error checking HIBP breach: {e}[/red]")
-            self.breached = "Unknown"
-
     def check_gravatar(self):
         h = hashlib.md5(self.email.strip().lower().encode()).hexdigest()
         url = f"https://www.gravatar.com/avatar/{h}?d=404"
@@ -254,7 +226,6 @@ class EmailIntelPro:
         self.fetch_txt_records()
         self.check_disposable()
         self.check_rdap()
-        self.check_breach()
         self.check_gravatar()
         self.calculate_score()
 
@@ -273,9 +244,9 @@ class EmailIntelPro:
         if self.breach_url:
             table.add_row("Leak Details", self.breach_url)
         table.add_row("TXT Records (SPF/DKIM)", "\n".join(self.txt_records[:3]) if self.txt_records else "❌ None")
-        table.add_row("Google Search", f"https://www.google.com/search?q=\"{self.email}\"")
+        table.add_row("Google Search", f"https://duckduckgo.com/?q=\"{self.email}\"")
         table.add_row("GitHub Search", f"https://github.com/search?q={self.email}")
-        table.add_row("Pastebin Search", f"https://www.google.com/search?q={self.email}+site:pastebin.com")
+        table.add_row("Pastebin Search", f"https://duckduckgo.com/?q={self.email}+site:pastebin.com")
         table.add_row("Threat Score", f"{self.score}/10")
         table.add_row("Threat Level", self.threat_label())
 
@@ -1026,7 +997,7 @@ class NetworkProtector:
                 "version": packet["version"]
             }
         }
-
+        
     def _cover_traffic_loop(self):
         while True:
             try:
@@ -1206,7 +1177,6 @@ class TorManagerCLI:
         self.stop_tor()
 
 def duckduckgo_search(query):
-    import html
     time.sleep(random.uniform(2, 5))
 
     headers = {
@@ -1704,7 +1674,8 @@ def print_help():
             ("dnsleak",               "Run a dnsleak test"),
             ("analyze! <url>",        "Analyze a URL for threat signals"),
             ("open <url>",            "Open and fetch a full URL (tracker-safe)"),
-            ("emailintel",            "Lookup Email Information")
+            ("emailintel",            "Lookup Email Information"),
+            ("emailhunt",             "Gather Email and Links")
         ]),
 
         ("Tools and Utilities", [
@@ -2180,18 +2151,115 @@ def interactive_prompt():
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         
+console = Console()
+
 class DarkelfUtils:
+    DUCKDUCKGO_LITE = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
+    TOR_PROXY = {
+        "http": "socks5h://127.0.0.1:9052",
+        "https": "socks5h://127.0.0.1:9052"
+    }
+
     def __init__(self):
-        self.socks_proxy = "socks5h://127.0.0.1:9052"
+        pass
+        
+    def generate_duckduckgo_dorks(self, query):
+        """
+        Returns a list of Google dork queries relevant to the input.
+        Works best for emails, usernames, or domains.
+        """
+        dorks = []
+
+        if "@" in query:
+            # Email dorks
+            dorks += [
+                f'"{query}" site:pastebin.com',
+                f'"{query}" site:github.com',
+                f'"{query}" filetype:txt',
+                f'"{query}" site:linkedin.com/in',
+                f'"{query}" site:facebook.com',
+            ]
+        elif query.startswith("+") or query.isdigit():
+            # Phone number dorks
+            dorks += [
+                f'"{query}" site:pastebin.com',
+                f'"{query}" filetype:pdf',
+            ]
+        else:
+            # Username or generic string
+            dorks += [
+                f'"{query}" site:pastebin.com',
+                f'"{query}" site:github.com',
+                f'"{query}" site:reddit.com',
+                f'"{query}" inurl:profile',
+                f'"{query}" filetype:pdf',
+            ]
+
+        return dorks
+        
+    def run_dork_searches(self, dorks: list, max_results=20):
+        """
+        Executes automated dork-style queries using DuckDuckGo Lite (via Tor).
+        Returns a dictionary mapping each dork to its result URLs.
+        """
+        results = {}
+
+        for dork in dorks:
+            try:
+                hits = self.onion_ddg_search(dork, max_results=max_results)
+                results[dork] = [url for _, url in hits] if hits else []
+            except Exception as e:
+                results[dork] = [f"[ERROR] {e}"]
+
+        return results
+
+    @staticmethod
+    def save_osint_data_to_json(data: dict, output_path: str = "osint_scrape_output.json"):
+        try:
+            with open(output_path, "r") as infile:
+                existing = json.load(infile)
+        except (FileNotFoundError, json.JSONDecodeError):
+            existing = []
+
+        existing.append(data)
+
+        with open(output_path, "w") as outfile:
+            json.dump(existing, outfile, indent=4)
+
+    @staticmethod
+    def run_email_scraper(email, use_tor=True):
+        console.print(f"🔍 [bold]Running email OSINT on:[/bold] {email}")
+        results = {}
+        try:
+            intel = EmailIntelPro(email, session=get_tor_session() if use_tor else requests.Session())
+            intel.analyze()
+
+            results["valid"] = intel.is_valid_email()
+            results["domain"] = intel.domain
+            results["prefix"] = intel.prefix
+            results["mx_records"] = intel.mx_records
+            results["txt_records"] = intel.txt_records
+            results["disposable"] = intel.disposable
+            results["rdap"] = intel.creation_date
+            results["gravatar"] = intel.gravatar
+            results["score"] = intel.score
+            results["threat_label"] = re.sub(r"\[.*?\]", "", intel.threat_label())  # strip color tags
+            results["breach"] = intel.breached
+
+        except Exception as e:
+            console.print(f"[red][ERROR][/red] Failed to run email scraper: {e}")
+        return results
 
     def beacon_onion_service(self, onion_url):
+        socks_proxy = "socks5h://127.0.0.1:9052"
+        
         if not onion_url.startswith("http"):
             onion_url = "http://" + onion_url
         try:
             r = requests.get(
                 onion_url,
                 headers={"User-Agent": "Mozilla/5.0"},
-                proxies={"http": self.socks_proxy, "https": self.socks_proxy},
+                proxies={"http": socks_proxy, "https": socks_proxy},
                 timeout=15
             )
             if r.status_code < 400:
@@ -2200,8 +2268,95 @@ class DarkelfUtils:
                 console.print(f"[⚠] Onion responded with status {r.status_code}")
         except Exception as e:
             console.print(f"[🚫] Failed to reach onion service: {e}")
+            
+    def fetch_and_display_links(self, term: str, max_results: int = 30):
+        """
+        Mimics the 'search' command: fetches URLs from DuckDuckGo and prints only titles + links.
+        """
+        console.print(f"\n[bold cyan]🔎 Fetching links for:[/bold cyan] {term}\n")
 
-# Assume console, USER_AGENTS, DUCKDUCKGO_LITE, get_tor_proxy, fetch_with_requests are defined globally
+        results = self.onion_ddg_search(term, max_results=max_results)
+
+        if not results:
+            console.print("[yellow]⚠ No results.[/yellow]")
+            return
+
+        seen = set()
+        count = 0
+        for title, url in results:
+            if url not in seen and url.startswith("http"):
+                count += 1
+                seen.add(url)
+                console.print(f"  ▪ {title} — [cyan]{url}[/cyan]")
+
+        if count == 0:
+            console.print("[yellow]⚠ No usable links found.[/yellow]")
+
+    def fetch_url(self, url, use_tor=True, timeout=15):
+        session = requests.Session()
+        if use_tor:
+            session.proxies = self.TOR_PROXY
+        res = session.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
+        return res.text
+
+    def parse_ddg_lite_results(self, soup):
+        results = []
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            text = a.get_text(strip=True)
+            if href.startswith("http") and "google.com" not in href.lower():
+                results.append((text or "[no snippet]", href))
+        return results if results else "no_results"
+
+    def onion_ddg_search(self, query, max_results=25, use_tor=True):
+        session = requests.Session()
+        if use_tor:
+            session.proxies = self.TOR_PROXY
+        headers = {"User-Agent": "Mozilla/5.0"}
+
+        try:
+            res = session.get(f"{self.DUCKDUCKGO_LITE}?q={quote_plus(query)}", headers=headers, timeout=20)
+            soup = BeautifulSoup(res.text, "html.parser")
+            results = self.parse_ddg_lite_results(soup)
+
+            if not results or results == "no_results":
+                console.print(f"[yellow]⚠ No results for {query} — trying POST fallback...[/yellow]")
+                res2 = session.post(self.DUCKDUCKGO_LITE, headers=headers, data={"q": query}, timeout=20)
+                soup2 = BeautifulSoup(res2.text, "html.parser")
+                results = self.parse_ddg_lite_results(soup2)
+
+                if not results or results == "no_results":
+                    console.print(f"[red]❌ Still no results after POST fallback for {query}[/red]")
+
+            return results[:max_results] if isinstance(results, list) else []
+
+        except Exception as e:
+            console.print(f"[red]❌ Onion search failed:[/red] {e}")
+            return []
+
+    def do_emailhunt(self, email: str, max_results=30):
+        console.print(f"\n[bold cyan]🔎 Email Hunt via DuckDuckGo Onion Lite[/bold cyan]")
+        console.print(f"[bold]Searching for:[/bold] {email}\n")
+
+        query = email
+        results = self.onion_ddg_search(query, max_results=max_results)
+
+        seen = set()
+        urls = []
+
+        for item in results:
+            url = item[1] if isinstance(item, (list, tuple)) and len(item) == 2 else str(item)
+            if url.startswith("http") and url not in seen:
+                urls.append(url)
+                seen.add(url)
+
+        if urls:
+            console.print(f"[green]✅ Found {len(urls)} site(s):[/green]\n")
+            for link in urls:
+                console.print(link)
+        else:
+            console.print("[yellow]⚠ No usable links found. Trying fallback like 'search' command...[/yellow]\n")
+            self.fetch_and_display_links(email)  # ✅ must include self.
 
 def run_phoneinfoga_scan(number: str):
     console.print(f"[cyan]📾 Running PhoneInfoga on:[/cyan] [bold]{number}[/bold]")
@@ -2212,24 +2367,13 @@ def run_phoneinfoga_scan(number: str):
         )
         if result.returncode == 0:
             console.print(f"[green]✔ PhoneInfoga result:[/green]\n{result.stdout}")
+            return result.stdout
         else:
             console.print(f"[red]✖ PhoneInfoga failed:[/red] {result.stderr}")
+            return result.stderr
     except Exception as e:
         console.print(f"[red]⚠ Error running PhoneInfoga:[/red] {e}")
-
-def run_theharvester_scan(target: str):
-    console.print(f"[cyan]📧 Running theHarvester on:[/cyan] [bold]{target}[/bold]")
-    try:
-        result = subprocess.run(
-            ["theHarvester", "-d", target, "-b", "all"],
-            capture_output=True, text=True, timeout=90
-        )
-        if result.returncode == 0:
-            console.print(f"[green]✔ theHarvester result:[/green]\n{result.stdout}")
-        else:
-            console.print(f"[red]✖ theHarvester failed:[/red] {result.stderr}")
-    except Exception as e:
-        console.print(f"[red]⚠ Error running theHarvester:[/red] {e}")
+        return str(e)
 
 def run_sherlock_scan(username: str):
     console.print(f"[cyan]🕵️ Running Sherlock on:[/cyan] [bold]{username}[/bold]")
@@ -2240,16 +2384,43 @@ def run_sherlock_scan(username: str):
         )
         if result.returncode == 0:
             console.print(f"[green]✔ Sherlock result:[/green]\n{result.stdout}")
+            return result.stdout
         else:
             console.print(f"[red]✖ Sherlock failed:[/red] {result.stderr}")
+            return result.stderr
     except Exception as e:
         console.print(f"[red]⚠ Error running Sherlock:[/red] {e}")
+        return str(e)
 
-def osintscan(query):
-    headers = {'User-Agent': random.choice(USER_AGENTS)}
-    proxies = {'http': get_tor_proxy(), 'https': get_tor_proxy()}
-    url = DUCKDUCKGO_LITE + f"?q={quote_plus(query)}"
-
+def extract_osint_data(html_content: str, username=None, email=None, phone=None) -> dict:
+    data = {
+        "emails": set(),
+        "phones": set(),
+        "usernames": set(),
+        "mentions": set()
+    }
+    # Email detection (exact)
+    if email:
+        for match in re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", html_content):
+            if match.lower() == email.lower():
+                data["emails"].add(match)
+                data["mentions"].add(match)
+    # Phone detection (exact, loose pattern)
+    if phone:
+        for match in re.findall(r"\+?\d[\d\s\-().]{6,}", html_content):
+            norm = re.sub(r"[^\d]", "", match)
+            if norm == phone:
+                data["phones"].add(match)
+                data["mentions"].add(match)
+    # Username detection (exact, case-insensitive)
+    if username:
+        if re.search(rf"\b{re.escape(username)}\b", html_content, re.I):
+            data["usernames"].add(username)
+            data["mentions"].add(username)
+    return data
+        
+def osintscan(query, use_tor=True, max_results=10):
+    utils = DarkelfUtils()
     is_email = bool(re.match(r"^[^@]+@[^@]+\.[^@]+$", query))
     is_phone = bool(re.match(r"^\+?\d[\d\s\-().]{6,}$", query))
     is_username = bool(re.match(r"^@?[a-zA-Z0-9_.-]{3,32}$", query)) and not is_email and not is_phone
@@ -2257,139 +2428,136 @@ def osintscan(query):
     username = query.lstrip('@') if is_username else None
     phone = re.sub(r"[^\d]", "", query) if is_phone else None
     email = query if is_email else None
+    domain = email.split("@")[1] if is_email and "@" in email else None
+    
+    results = {
+        "profiles": [],
+        "mentions": [],
+        "emails": [],
+        "phones": [],
+    }
+    
+    email_data = {}  # default
 
-    direct_links = []
+    if is_email:
+        email_data = DarkelfUtils.run_email_scraper(email, use_tor=use_tor)
+        if email_data.get("valid"):
+            results["emails"].append(email)
+
+    if is_phone:
+        # PhoneInfoga scan + deep search for matches
+        phoneinfoga_output = run_phoneinfoga_scan(query)
+        found_numbers = set(re.findall(r"\+?\d[\d\s\-().]{6,}", phoneinfoga_output))
+        results["phones"].extend(found_numbers)
+        results["mentions"].append("PhoneInfoga:\n" + phoneinfoga_output.strip())
 
     if is_username:
-        run_sherlock_scan(username)
-        platforms = {
-            "Twitter": f"https://twitter.com/{username}",
-            "GitHub": f"https://github.com/{username}",
-            "Instagram": f"https://instagram.com/{username}",
-            "Reddit": f"https://reddit.com/user/{username}",
-            "Facebook": f"https://facebook.com/{username}",
-            "TikTok": f"https://tiktok.com/@{username}",
-            "LinkedIn Search": f"https://www.linkedin.com/search/results/all/?keywords={username}",
-            "Pinterest": f"https://www.pinterest.com/{username}/",
-        }
-        direct_links = [(site, link) for site, link in platforms.items()]
-
-    elif is_email:
-        domain_match = re.search(r"@(.+)", email)
-        if domain_match:
-            run_theharvester_scan(domain_match.group(1))
-        platforms = {
-            "Google Search": f"https://www.google.com/search?q={quote_plus(email)}",
-            "Hunter.io": f"https://hunter.io/search/{quote_plus(email)}",
-            "LinkedIn Search": f"https://www.linkedin.com/search/results/all/?keywords={quote_plus(email)}",
-            "Twitter Search": f"https://twitter.com/search?q={quote_plus(email)}",
-            "Facebook Search": f"https://www.facebook.com/search/top/?q={quote_plus(email)}",
-            "Skype Search": f"https://www.skype.com/en/search/?q={quote_plus(email)}",
-            "DuckDuckGo": f"https://duckduckgo.com/?q={quote_plus(email)}"
-        }
-        direct_links = [(site, link) for site, link in platforms.items()]
-
-    elif is_phone:
-        run_phoneinfoga_scan(query)
-        platforms = {
-            "Google Search": f"https://www.google.com/search?q={quote_plus(query)}",
-            "Sync.me": f"https://sync.me/search/?number={phone}",
-            "TrueCaller": f"https://www.truecaller.com/search/{phone[:2]}/{phone}",
-            "Facebook Search": f"https://www.facebook.com/search/top/?q={quote_plus(query)}",
-            "Twitter Search": f"https://twitter.com/search?q={quote_plus(query)}",
-            "DuckDuckGo": f"https://duckduckgo.com/?q={quote_plus(query)}"
-        }
-        direct_links = [(site, link) for site, link in platforms.items()]
-
-    if direct_links:
-        console.print(f"\n[cyan]🔗 Direct OSINT links for query:[/cyan] [bold]{query}[/bold]")
-        for site, link in direct_links:
-            console.print(f"   [magenta]{site}:[/magenta] [green]{link}[/green]")
-
-    try:
-        response = requests.get(url, headers=headers, proxies=proxies, timeout=20)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        results = []
-        for a in soup.find_all("a", href=True):
-            href = html.unescape(a["href"])
-            text = a.get_text(strip=True)
-            if href.startswith("http"):
-                results.append((text, href))
-
-        if not results:
-            url_matches = set(re.findall(r'https?://[^\s"\'<>]+', response.text))
-            if url_matches:
-                console.print(f"[yellow]🔗 URLs found by regex fallback:[/yellow]")
-                for link in url_matches:
-                    console.print(f"   [green]{link}[/green]")
-                results = [("", link) for link in url_matches]
-            else:
-                console.print("[red]No URLs found in DuckDuckGo results.[/red]")
-        else:
-            console.print(f"[yellow]🔗 URLs found in DuckDuckGo results:[/yellow]")
-            for txt, link in results:
-                console.print(f"   [green]{link}[/green] ({txt})")
-
-        scan_urls = [u for _, u in results]
-        if direct_links:
-            scan_urls += [link for site, link in direct_links if not any(s in site.lower() for s in ["search", "google", "duckduckgo"])]
-
-        all_data = {
-            "emails": set(),
-            "phone_numbers": set(),
-            "social_handles": set(),
-            "crypto_wallets": set(),
-            "urls": set(),
-        }
-
-        for u in scan_urls:
-            all_data["urls"].add(u)
-
-        for u in scan_urls[:5]:
-            console.print(f"[blue]→ Scanning:[/blue] {u}")
+        sherlock_output = run_sherlock_scan(username)
+        sherlock_urls = re.findall(r"(https?://[^\s]+)", sherlock_output)
+        for url in sherlock_urls:
+            results["profiles"].append(url)
+        # Deep search for username mentions
+        ddg_results = utils.onion_ddg_search(f'"{username}"')
+        for text, url in ddg_results[:max_results]:
             try:
-                html_content, _ = fetch_with_requests(u)
-                osint_data = extract_osint_data(html_content, source_url=u)
-                for key in all_data:
-                    all_data[key].update(osint_data.get(key, []))
-            except Exception as e:
-                console.print(f"[red]  Failed to fetch or parse {u}: {e}[/red]")
+                html_content = fetch_url(url, use_tor=use_tor, timeout=10)
+                osint_data = extract_osint_data(html_content, username=username)
+                if osint_data["usernames"]:
+                    results["mentions"].append(url)
+            except Exception:
+                continue
 
-        console.print("\n[yellow bold]📊 OSINT Summary:[/yellow bold]")
-        for key, values in all_data.items():
-            if values:
-                console.print(f"[cyan]{key}[/cyan]:")
-                for v in sorted(values):
-                    console.print(f"   [green]- {v}[/green]")
+    if is_email:
+        # Email scraper
+        found_emails = DarkelfUtils.run_email_scraper(email, use_tor=use_tor)
+        for e in found_emails:
+            if e.lower() == email.lower():
+                results["emails"].append(e)
+        # Deep search for email mentions
+        ddg_results = utils.onion_ddg_search(f'"{email}"', use_tor=use_tor)
+        for text, url in ddg_results[:max_results]:
+            try:
+                html_content = fetch_url(url, use_tor=use_tor, timeout=10)
+                osint_data = extract_osint_data(html_content, email=email)
+                if osint_data["emails"]:
+                    results["mentions"].append(url)
+            except Exception:
+                continue
+        pastebin_results = utils.onion_ddg_search(f'"{email}" site:pastebin.com', use_tor=use_tor)
+        for text, url in pastebin_results[:max_results]:
+            try:
+                html_content = fetch_url(url, use_tor=use_tor, timeout=10)
+                osint_data = extract_osint_data(html_content, email=email)
+                if osint_data["emails"]:
+                    results["mentions"].append(url)
+            except Exception:
+                continue
+
+    # OUTPUT
+    if results["profiles"]:
+        console.print("\n[green]🔗 Correlated Profiles:[/green]")
+        for url in sorted(set(results["profiles"])):
+            console.print(f"   [cyan]{url}[/cyan]")
+    elif is_username:
+        console.print("[yellow]No correlated profiles found.[/yellow]")
+
+    if results["emails"]:
+        console.print("\n[green]✉️ Exact Emails Found:[/green]")
+        for e in results["emails"]:
+            console.print(f"   [cyan]{e}[/cyan]")
+
+    if results["phones"]:
+        console.print("\n[green]📞 Exact Phone Numbers Found:[/green]")
+        for p in sorted(set(results["phones"])):
+            console.print(f"   [cyan]{p}[/cyan]")
+
+    if results["mentions"]:
+        console.print("\n[yellow]🔎 Mentions/Leaks:[/yellow]")
+        for url in sorted(set(results["mentions"])):
+            # If PhoneInfoga or other tool summary instead of URL
+            if url.startswith("PhoneInfoga:"):
+                console.print(f"   [magenta]{url}[/magenta]")
             else:
-                console.print(f"[dim]{key}: (none found)[/dim]")
+                console.print(f"   [cyan]{url}[/cyan]")
+    else:
+        console.print("[yellow]No mentions or leaks found.[/yellow]")
 
-    except Exception as e:
-        console.print(f"[red]OSINT scan failed: {e}[/red]")
+    # Always show useful search links (using DDG Onion Lite and other options)
+    console.print("\n[blue]🔍 Useful search links:[/blue]")
 
-def extract_osint_data(html_content: str, source_url: str = "(unknown)") -> dict:
-    data = {
-        "emails": list(set(re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", html_content))),
-        "phone_numbers": list(set(re.findall(r"\b\+?\d{1,4}?[-.\s]?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}\b", html_content))),
-        "social_handles": list(set(re.findall(r"(?:@\w{2,}|(?:twitter|facebook|instagram)\.com/\w+)", html_content))),
-        "crypto_wallets": list(set(re.findall(r"\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b", html_content))),
-        "urls": list(set(re.findall(r"https?://[^\s\"'>]+", html_content))),
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "source_url": source_url
-    }
-    return data
+    ddg_onion_lite = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
 
-def save_osint_data_to_json(data: dict, output_path: str = "osint_scrape_output.json"):
-    try:
-        with open(output_path, "r") as infile:
-            existing = json.load(infile)
-    except (FileNotFoundError, json.JSONDecodeError):
-        existing = []
+    for name, url in [
+        ("Startpage", f"https://www.startpage.com/do/dsearch?query={quote_plus(query)}"),
+        ("DuckDuckGo", f"{ddg_onion_lite}?q={quote_plus(query)}"),
+        ("Twitter", f"https://twitter.com/search?q={quote_plus(query)}"),
+        ("Pastebin", f"{ddg_onion_lite}?q={quote_plus(query)}+site:pastebin.com"),
+        ("LinkedIn", f"https://www.linkedin.com/search/results/all/?keywords={quote_plus(query)}"),
+        ("Facebook", f"https://www.facebook.com/search/top/?q={quote_plus(query)}"),
+    ]:
+        console.print(f"   [bold]{name}:[/bold] [cyan]{url}[/cyan]")
+        
+    # 🔍 Generate DuckDuckGo dorks based on query
+    dorks = utils.generate_duckduckgo_dorks(query)
 
-    existing.append(data)
+    console.print("\n[bold magenta]🕵️ DuckDuckGo Dorking Suggestions:[/bold magenta]")
 
-    with open(output_path, "w") as outfile:
-        json.dump(existing, outfile, indent=4)
+    ddg_lite_base = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
+    for dork in dorks:
+        dork_url = f"{ddg_lite_base}?q={quote_plus(dork)}"
+        console.print(f"   [italic]{dork}[/italic] → [cyan]{dork_url}[/cyan]")
+
+    # 🔎 Execute each dork using DuckDuckGo Onion Lite search
+    console.print("\n[bold magenta]🔗 DuckDuckGo Dorking Results:[/bold magenta]")
+    dork_results = utils.run_dork_searches(dorks)
+
+    for dork, links in dork_results.items():
+        console.print(f"\n[italic]{dork}[/italic]")
+        if links:
+            for url in links:
+                console.print(f"   [cyan]{url}[/cyan]")
+        else:
+            console.print("   [yellow]No results.[/yellow]")
 
 # Logging Setup
 logging.basicConfig(
@@ -2651,6 +2819,72 @@ def start_tls_monitor():
     monitor = DarkelfTLSMonitorJA3(monitored_sites, interval=300)
     monitor.start()  # Already runs in a background thread
 
+# === BEGIN PATCH: Deep Emailhunt ===
+def deep_emailhunt(email: str, use_tor: bool = True, max_links: int = 30):
+    """
+    Search for mentions of the email across the open web using DuckDuckGo.
+    Returns a dict: {url -> [context snippets]}.
+    """
+    session = get_tor_session() if use_tor else requests.Session()
+    results = {}
+    seen_urls = set()
+
+    # Deduplicated and expanded queries
+    queries = list(dict.fromkeys([
+        f'"{email}"',
+        f'"{email}" profile',
+        f'"{email}" contact',
+        f'"{email}" resume',
+        f'"{email}" CV',
+        f'intext:{email}',
+        f'site:github.com "{email}"',
+        f'site:pastebin.com "{email}"',
+        f'site:linkedin.com "{email}"',
+        f'site:orcid.org "{email}"',
+    ]))
+
+    for query in queries:
+        try:
+            console.print(f"[green]🔎 Searching:[/green] {query}")
+            links = DarkelfUtils().duckduckgo_onion_search(query, max_results=max_links)
+            for _, url in links[:max_links]:
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                try:
+                    html = fetch_url(url, use_tor=use_tor, timeout=15)
+                    if email.lower() in html.lower():
+                        context = extract_context_lines(html, email)
+                        results[url] = context if context else ["(email found, no extractable snippet)"]
+                except Exception as fetch_err:
+                    console.print(f"[red]⚠ Failed to fetch:[/red] {url} - {fetch_err}")
+                    continue
+        except Exception as search_err:
+            console.print(f"[red]⚠ DuckDuckGo search failed:[/red] {query} - {search_err}")
+            continue
+
+    if results:
+        console.print(f"\n[yellow]🔎 Mentions of {email} found:[/yellow]")
+        for url, snippets in results.items():
+            console.print(f"[cyan]{url}[/cyan]")
+            for snippet in snippets:
+                console.print(f"   [dim]{snippet}[/dim]")
+    else:
+        console.print(f"[red]No visible mentions of {email} found.[/red]")
+
+    return results
+
+def extract_context_lines(text: str, keyword: str, window: int = 100):
+    context_snippets = []
+    for match in re.finditer(re.escape(keyword), text, re.IGNORECASE):
+        start = max(0, match.start() - window)
+        end = match.end() + window
+        snippet = text[start:end].replace("\n", " ").strip()
+        context_snippets.append("... " + snippet + " ...")
+    return context_snippets or ["(found on page but no specific snippet extracted)"]
+    
+# === END PATCH ===
+
 def repl_main():
     os.environ["HISTFILE"] = ""
     try:
@@ -2755,6 +2989,11 @@ def repl_main():
             elif cmd.startswith("emailintel "):
                 target = cmd.split(" ", 1)[1].strip()
                 EmailIntelPro(target, session=get_tor_session()).analyze()
+                
+            elif cmd.startswith("emailhunt "):
+                email = cmd.split(" ", 1)[1].strip()
+                utils.do_emailhunt(email)
+                print()
 
             elif cmd == "tools":
                 print_tools_help()
@@ -2894,3 +3133,4 @@ if __name__ == "__main__":
     # Step 5: In-memory log cleanup
     for category in pq_logger.logs:
         pq_logger.logs[category].clear()
+
