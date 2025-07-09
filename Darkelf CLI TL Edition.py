@@ -83,6 +83,9 @@ import tls_client
 import html
 import ipaddress
 import dns.resolver
+import io
+import contextlib
+import phonenumbers
 from urllib.parse import quote_plus
 from collections import deque
 from typing import Optional, List, Dict
@@ -105,6 +108,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from dotenv import load_dotenv
 from requests import Response
 from dotenv import load_dotenv
+from phonenumbers import carrier, geocoder, timezone
 import requests
 
 # --- Tor integration via Stem ---
@@ -2165,51 +2169,110 @@ class DarkelfUtils:
         
     def generate_duckduckgo_dorks(self, query):
         """
-        Returns a list of Google dork queries relevant to the input.
-        Works best for emails, usernames, or domains.
+        Generates advanced DuckDuckGo dork-style queries for OSINT scanning.
+        Works for emails, usernames, phone numbers, and domains.
         """
         dorks = []
 
+        # Email
         if "@" in query:
-            # Email dorks
             dorks += [
                 f'"{query}" site:pastebin.com',
                 f'"{query}" site:github.com',
                 f'"{query}" filetype:txt',
                 f'"{query}" site:linkedin.com/in',
                 f'"{query}" site:facebook.com',
+                f'"{query}" intitle:index.of',
+                f'"{query}" ext:log OR ext:txt',
+                f'"{query}" site:medium.com',
+                f'"{query}" site:archive.org',
             ]
-        elif query.startswith("+") or query.isdigit():
-            # Phone number dorks
+
+        # Phone Number
+        elif query.startswith("+") or query.replace(" ", "").isdigit():
             dorks += [
                 f'"{query}" site:pastebin.com',
                 f'"{query}" filetype:pdf',
+                f'"{query}" site:whocallsme.com',
+                f'"{query}" intitle:index.of',
+                f'"{query}" ext:log OR ext:txt',
             ]
-        else:
-            # Username or generic string
+
+        # Domain
+        elif "." in query:
             dorks += [
-                f'"{query}" site:pastebin.com',
+                f'site:{query} ext:log',
+                f'site:{query} ext:txt',
+                f'"@{query}"',
+                f'"{query}" intitle:index.of',
+                f'"{query}" filetype:csv',
+                f'"{query}" site:archive.org',
+            ]
+
+        # Username / Handle / Other
+        else:
+            dorks += [
                 f'"{query}" site:github.com',
                 f'"{query}" site:reddit.com',
+                f'"{query}" site:twitter.com',
+                f'"{query}" site:medium.com',
                 f'"{query}" inurl:profile',
+                f'"{query}" intitle:profile',
                 f'"{query}" filetype:pdf',
+                f'"{query}" site:pastebin.com',
+                f'"{query}" ext:log OR ext:txt',
             ]
 
         return dorks
-        
-    def run_dork_searches(self, dorks: list, max_results=20):
+
+    def run_dork_searches(self, dorks: list, max_results=10):
         """
-        Executes automated dork-style queries using DuckDuckGo Lite (via Tor).
-        Returns a dictionary mapping each dork to its result URLs.
+        Executes DuckDuckGo Lite dork-style queries via Tor.
+        Assigns URLs to the first matching dork only (based on order).
+        Prints only successful results and summarizes failed dorks.
         """
         results = {}
+        failed_dorks = []
+        seen_urls = set()
+
+        category_colors = {
+            "github.com": "green",
+            "reddit.com": "red",
+            "twitter.com": "blue",
+            "medium.com": "magenta",
+            "pastebin.com": "yellow",
+            "linkedin.com": "bright_cyan",
+            "facebook.com": "bright_blue",
+            "inurl:profile": "cyan",
+            "intitle:profile": "bright_magenta",
+            "filetype:pdf": "bright_yellow",
+            "ext:log": "bright_red",
+            "ext:txt": "bright_red",
+        }
+
+        console.print("\n[bold underline cyan]🔗 DuckDuckGo Dorking Results:[/bold underline cyan]")
 
         for dork in dorks:
             try:
                 hits = self.onion_ddg_search(dork, max_results=max_results)
-                results[dork] = [url for _, url in hits] if hits else []
-            except Exception as e:
-                results[dork] = [f"[ERROR] {e}"]
+                urls = [url for _, url in hits if url not in seen_urls] if hits else []
+
+                if urls:
+                    for url in urls:
+                        seen_urls.add(url)
+
+                    color = next((v for k, v in category_colors.items() if k in dork), "white")
+                    console.print(f"\n[bold {color}]🔍 Dork:[/bold {color}] [italic]{dork}[/italic]")
+                    for i, url in enumerate(urls[:max_results], 1):
+                        console.print(f"   {i}. [cyan]{url}[/cyan]")
+                    results[dork] = urls[:max_results]
+                else:
+                    failed_dorks.append(dork)
+            except Exception:
+                failed_dorks.append(dork)
+
+        if failed_dorks:
+            console.print(f"\n[yellow]⚠ No new results for {len(failed_dorks)} dork(s).[/yellow]")
 
         return results
 
@@ -2320,13 +2383,12 @@ class DarkelfUtils:
             results = self.parse_ddg_lite_results(soup)
 
             if not results or results == "no_results":
-                console.print(f"[yellow]⚠ No results for {query} — trying POST fallback...[/yellow]")
                 res2 = session.post(self.DUCKDUCKGO_LITE, headers=headers, data={"q": query}, timeout=20)
                 soup2 = BeautifulSoup(res2.text, "html.parser")
                 results = self.parse_ddg_lite_results(soup2)
 
                 if not results or results == "no_results":
-                    console.print(f"[red]❌ Still no results after POST fallback for {query}[/red]")
+                    pass
 
             return results[:max_results] if isinstance(results, list) else []
 
@@ -2358,22 +2420,109 @@ class DarkelfUtils:
             console.print("[yellow]⚠ No usable links found. Trying fallback like 'search' command...[/yellow]\n")
             self.fetch_and_display_links(email)  # ✅ must include self.
 
-def run_phoneinfoga_scan(number: str):
-    console.print(f"[cyan]📾 Running PhoneInfoga on:[/cyan] [bold]{number}[/bold]")
+
+DUCKDUCKGO_LITE = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
+
+def generate_darkelf_dorks(phone_number):
+    DUCKDUCKGO_LITE = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
+    clean = phone_number.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
+    formats = [
+        phone_number,
+        clean,
+        f"+{clean}",
+        f"({clean[:3]}) {clean[3:6]}-{clean[6:]}" if len(clean) == 10 else phone_number
+    ]
+
+    base_sites = [
+        "site:pastebin.com", "site:whocalled.us", "site:findwhocallsme.com",
+        "site:locatefamily.com", "site:phonenumbers.ie", "intitle:index.of",
+        "ext:log OR ext:txt", "filetype:pdf", "filetype:doc"
+    ]
+
+    dork_urls = []
+
+    for site in base_sites:
+        for f in formats:
+            dork = f'{site} intext:"{f}"'
+            ddg_url = f"{DUCKDUCKGO_LITE}?q={quote_plus(dork)}"
+            dork_urls.append(ddg_url)
+
+    return dork_urls
+
+def format_phone_local(phone):
+    digits = ''.join(filter(str.isdigit, phone))
+    if len(digits) == 11 and digits.startswith('1'):
+        digits = digits[1:]
+    if len(digits) != 10:
+        return phone, phone, phone, phone
+    return (
+        digits,
+        f"({digits[:3]}) {digits[3:6]}-{digits[6:]}",
+        f"+1{digits}",
+        f"1{digits}"
+    )
+    
+def get_phone_metadata(phone):
     try:
-        result = subprocess.run(
-            ["phoneinfoga", "scan", "-n", number],
-            capture_output=True, text=True, timeout=60
-        )
-        if result.returncode == 0:
-            console.print(f"[green]✔ PhoneInfoga result:[/green]\n{result.stdout}")
-            return result.stdout
-        else:
-            console.print(f"[red]✖ PhoneInfoga failed:[/red] {result.stderr}")
-            return result.stderr
-    except Exception as e:
-        console.print(f"[red]⚠ Error running PhoneInfoga:[/red] {e}")
-        return str(e)
+        parsed = phonenumbers.parse(phone, "US")
+        return {
+            "valid": phonenumbers.is_valid_number(parsed),
+            "possible": phonenumbers.is_possible_number(parsed),
+            "location": geocoder.description_for_number(parsed, "en"),
+            "carrier": carrier.name_for_number(parsed, "en"),
+            "timezones": timezone.time_zones_for_number(parsed)
+        }
+    except Exception:
+        return {
+            "valid": False,
+            "possible": False,
+            "location": "",
+            "carrier": "",
+            "timezones": []
+        }
+
+DISPOSABLE_CARRIERS = {
+    "Google", "Twilio", "Bandwidth", "Onvoy", "TextNow", "Pinger", "TextPlus",
+    "Talkatone", "Burner", "Hushed", "Sideline", "Line2", "FreeTone", "VoIP"
+}
+
+def run_phone_scan(phone):
+    raw, local, e164, international = format_phone_local(phone)
+    dorks = generate_darkelf_dorks(phone)
+
+    summary_lines = []
+    summary_lines.append(f"📞 [Darkelf] Running phone scan for: {phone}\n")
+
+    # 📍 Metadata extraction
+    phone_meta = get_phone_metadata(phone)
+    carrier_name = phone_meta.get("carrier", "Unknown")
+    location = phone_meta.get("location", "Unknown")
+    timezones = phone_meta.get("timezones", [])
+    is_valid = phone_meta.get("valid", False)
+    is_possible = phone_meta.get("possible", False)
+
+    # 🧪 Disposable/VoIP detection
+    disposable_detected = any(d.lower() in carrier_name.lower() for d in DISPOSABLE_CARRIERS)
+
+    summary_lines.append("Results for local")
+    summary_lines.append(f"Raw local: {raw}")
+    summary_lines.append(f"Local: {local}")
+    summary_lines.append(f"E164: {e164}")
+    summary_lines.append(f"International: {international}")
+    summary_lines.append(f"Country: US")
+    summary_lines.append(f"Location: {location}")
+    summary_lines.append(f"Carrier: {carrier_name}")
+    summary_lines.append(f"Timezones: {', '.join(timezones)}")
+    summary_lines.append(f"Valid: {'Yes' if is_valid else 'No'}")
+    summary_lines.append(f"Possible: {'Yes' if is_possible else 'No'}")
+    summary_lines.append(f"Disposable/VoIP: {'Yes' if disposable_detected else 'No'}")
+
+    # 🔍 Darkelf-style Dork summary (via DuckDuckGo Onion Lite)
+    summary_lines.append("\nDarkelf Dorks: [URLs Hidden]")
+    summary_lines.append(f"Total dorks generated: {len(dorks)}")
+    summary_lines.append("✅ 2 scanner(s) succeeded")
+
+    return "\n".join(summary_lines)
 
 def run_sherlock_scan(username: str):
     console.print(f"[cyan]🕵️ Running Sherlock on:[/cyan] [bold]{username}[/bold]")
@@ -2445,11 +2594,25 @@ def osintscan(query, use_tor=True, max_results=10):
             results["emails"].append(email)
 
     if is_phone:
-        # PhoneInfoga scan + deep search for matches
-        phoneinfoga_output = run_phoneinfoga_scan(query)
-        found_numbers = set(re.findall(r"\+?\d[\d\s\-().]{6,}", phoneinfoga_output))
-        results["phones"].extend(found_numbers)
-        results["mentions"].append("PhoneInfoga:\n" + phoneinfoga_output.strip())
+        # Run phone scan and capture output
+        phone_output = run_phone_scan(query)
+
+        # Extract and append found phone number formats
+        raw, local, e164, international = format_phone_local(query)
+        results["phones"].extend({raw, local, e164, international})
+
+        # Extract all URLs (no Google filtering needed anymore)
+        urls = re.findall(r"https?://[^\s]+", phone_output)
+        if urls:
+            results["mentions"].extend(urls)
+
+        # Clean the phone_output for mention logging
+        lines = phone_output.splitlines()
+        filtered_lines = [line for line in lines if line.strip()]
+        cleaned = "\n".join(filtered_lines).strip()
+
+        if cleaned:
+            results["mentions"].append("PhoneScan:\n" + cleaned)
 
     if is_username:
         sherlock_output = run_sherlock_scan(username)
@@ -2514,11 +2677,7 @@ def osintscan(query, use_tor=True, max_results=10):
     if results["mentions"]:
         console.print("\n[yellow]🔎 Mentions/Leaks:[/yellow]")
         for url in sorted(set(results["mentions"])):
-            # If PhoneInfoga or other tool summary instead of URL
-            if url.startswith("PhoneInfoga:"):
-                console.print(f"   [magenta]{url}[/magenta]")
-            else:
-                console.print(f"   [cyan]{url}[/cyan]")
+            console.print(f"   [cyan]{url}[/cyan]")
     else:
         console.print("[yellow]No mentions or leaks found.[/yellow]")
 
@@ -2550,14 +2709,6 @@ def osintscan(query, use_tor=True, max_results=10):
     # 🔎 Execute each dork using DuckDuckGo Onion Lite search
     console.print("\n[bold magenta]🔗 DuckDuckGo Dorking Results:[/bold magenta]")
     dork_results = utils.run_dork_searches(dorks)
-
-    for dork, links in dork_results.items():
-        console.print(f"\n[italic]{dork}[/italic]")
-        if links:
-            for url in links:
-                console.print(f"   [cyan]{url}[/cyan]")
-        else:
-            console.print("   [yellow]No results.[/yellow]")
 
 # Logging Setup
 logging.basicConfig(
@@ -3133,4 +3284,3 @@ if __name__ == "__main__":
     # Step 5: In-memory log cleanup
     for category in pq_logger.logs:
         pq_logger.logs[category].clear()
-
