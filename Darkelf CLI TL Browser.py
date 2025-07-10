@@ -2396,32 +2396,70 @@ class DarkelfUtils:
             console.print(f"[red]❌ Onion search failed:[/red] {e}")
             return []
 
-    def do_emailhunt(self, email: str, max_results=30):
+    def do_emailhunt(self, query: str, max_results=30):
         console.print(f"\n[bold cyan]🔎 Email Hunt via DuckDuckGo Onion Lite[/bold cyan]")
-        console.print(f"[bold]Searching for:[/bold] {email}\n")
+        console.print(f"[bold]Searching for:[/bold] {query}\n")
 
-        query = email
-        results = self.onion_ddg_search(query, max_results=max_results)
+        # Accept emails or usernames
+        if "@" in query:
+            username = query.split("@")[0]
+            search_term = f'"{username}"'
+        else:
+            search_term = f'"{query}"'
+
+        # Smart dorks (focus on profile mentions)
+        dorks = [
+            f'{search_term} inurl:profile',
+            f'{search_term} inurl:user',
+            f'{search_term} inurl:members',
+            f'{search_term} site:github.com',
+            f'{search_term} site:linkedin.com/in',
+            f'{search_term} site:stackoverflow.com/users',
+            f'{search_term} site:reddit.com/user',
+            f'{search_term} site:gravatar.com',
+            f'{search_term} site:medium.com/@',
+            f'{search_term} site:about.me',
+            f'{search_term} site:angel.co',
+            f'{search_term} site:behance.net',
+            f'{search_term} site:dev.to',
+            f'{search_term} site:dribbble.com',
+            f'{search_term} site:producthunt.com',
+            f'{search_term} site:flipboard.com',
+            f'{search_term} site:hubpages.com',
+            f'{search_term} site:quora.com/profile',
+            f'{search_term} ext:log OR ext:txt'
+        ]
 
         seen = set()
         urls = []
 
-        for item in results:
-            url = item[1] if isinstance(item, (list, tuple)) and len(item) == 2 else str(item)
-            if url.startswith("http") and url not in seen:
-                urls.append(url)
-                seen.add(url)
+        for dork in dorks:
+            results = self.onion_ddg_search(dork, max_results=max_results)
+            for item in results:
+                url = item[1] if isinstance(item, (list, tuple)) and len(item) == 2 else str(item)
+                if url.startswith("http") and url not in seen:
+                    # Filter out garbage
+                    junk = ["login", "faq", "help", "support", "contact", "privacy"]
+                    if not any(j in url.lower() for j in junk):
+                        urls.append(url)
+                        seen.add(url)
+            if len(urls) >= max_results:
+                break
 
         if urls:
             console.print(f"[green]✅ Found {len(urls)} site(s):[/green]\n")
-            for link in urls:
-                console.print(link)
+            for link in urls[:max_results]:
+                console.print(f"[cyan]{link}[/cyan]")
         else:
             console.print("[yellow]⚠ No usable links found. Trying fallback like 'search' command...[/yellow]\n")
-            self.fetch_and_display_links(email)  # ✅ must include self.
-
+            self.fetch_and_display_links(query)  # fallback
 
 DUCKDUCKGO_LITE = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
+
+DISPOSABLE_CARRIERS = {
+    "google", "twilio", "bandwidth", "onvoy", "textnow", "pinger", "textplus",
+    "talkatone", "burner", "hushed", "sideline", "line2", "freetone", "voip"
+}
 
 def generate_darkelf_dorks(phone_number):
     DUCKDUCKGO_LITE = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
@@ -2462,9 +2500,9 @@ def format_phone_local(phone):
         f"1{digits}"
     )
     
-def get_phone_metadata(phone):
+def get_phone_metadata(phone, region="US"):
     try:
-        parsed = phonenumbers.parse(phone, "US")
+        parsed = phonenumbers.parse(phone, region)
         return {
             "valid": phonenumbers.is_valid_number(parsed),
             "possible": phonenumbers.is_possible_number(parsed),
@@ -2481,12 +2519,18 @@ def get_phone_metadata(phone):
             "timezones": []
         }
 
-DISPOSABLE_CARRIERS = {
-    "Google", "Twilio", "Bandwidth", "Onvoy", "TextNow", "Pinger", "TextPlus",
-    "Talkatone", "Burner", "Hushed", "Sideline", "Line2", "FreeTone", "VoIP"
-}
+def is_disposable_voip(carrier_name):
+    if not carrier_name or carrier_name.lower() == "unknown":
+        return "Inconclusive"
+    # Fuzzy match for any carrier in the list or "voip"/"virtual"
+    carrier_name_lc = carrier_name.lower()
+    if any(d in carrier_name_lc for d in DISPOSABLE_CARRIERS):
+        return "Yes"
+    if "voip" in carrier_name_lc or "virtual" in carrier_name_lc:
+        return "Likely"
+    return "No"
 
-def run_phone_scan(phone):
+def run_phone_scan(phone, region="US", show_dorks=False):
     raw, local, e164, international = format_phone_local(phone)
     dorks = generate_darkelf_dorks(phone)
 
@@ -2494,35 +2538,48 @@ def run_phone_scan(phone):
     summary_lines.append(f"📞 [Darkelf] Running phone scan for: {phone}\n")
 
     # 📍 Metadata extraction
-    phone_meta = get_phone_metadata(phone)
-    carrier_name = phone_meta.get("carrier", "Unknown")
-    location = phone_meta.get("location", "Unknown")
+    phone_meta = get_phone_metadata(phone, region=region)
+    carrier_name = phone_meta.get("carrier", "Unknown") or "Unknown"
+    location = phone_meta.get("location", "Unknown") or "Unknown"
     timezones = phone_meta.get("timezones", [])
     is_valid = phone_meta.get("valid", False)
     is_possible = phone_meta.get("possible", False)
 
     # 🧪 Disposable/VoIP detection
-    disposable_detected = any(d.lower() in carrier_name.lower() for d in DISPOSABLE_CARRIERS)
+    disposable_status = is_disposable_voip(carrier_name)
 
-    summary_lines.append("Results for local")
+    summary_lines.append("=== Results ===")
     summary_lines.append(f"Raw local: {raw}")
     summary_lines.append(f"Local: {local}")
     summary_lines.append(f"E164: {e164}")
     summary_lines.append(f"International: {international}")
-    summary_lines.append(f"Country: US")
+    summary_lines.append(f"Country: {region}")
     summary_lines.append(f"Location: {location}")
-    summary_lines.append(f"Carrier: {carrier_name}")
-    summary_lines.append(f"Timezones: {', '.join(timezones)}")
+    summary_lines.append(f"Carrier: {carrier_name if carrier_name else 'Unknown'}")
+    summary_lines.append(f"Timezones: {', '.join(timezones) if timezones else 'Unknown'}")
     summary_lines.append(f"Valid: {'Yes' if is_valid else 'No'}")
     summary_lines.append(f"Possible: {'Yes' if is_possible else 'No'}")
-    summary_lines.append(f"Disposable/VoIP: {'Yes' if disposable_detected else 'No'}")
+    summary_lines.append(f"Disposable/VoIP: {disposable_status}")
+
+    if carrier_name.lower() == "unknown" or not carrier_name:
+        summary_lines.append(
+            "⚠️ Carrier could not be determined. This number may be unlisted, new, ported, or from an obscure/virtual provider. Disposable/VoIP status is inconclusive."
+        )
 
     # 🔍 Darkelf-style Dork summary (via DuckDuckGo Onion Lite)
-    summary_lines.append("\nDarkelf Dorks: [URLs Hidden]")
+    summary_lines.append("\n=== Darkelf Dorks ===")
+    if show_dorks:
+        for url in dorks:
+            summary_lines.append(url)
+    else:
+        summary_lines.append("[URLs Hidden]")
     summary_lines.append(f"Total dorks generated: {len(dorks)}")
     summary_lines.append("✅ 2 scanner(s) succeeded")
 
     return "\n".join(summary_lines)
+
+# Example usage:
+# print(run_phone_scan("+1 (555) 123-4567", show_dorks=True))
 
 def run_sherlock_scan(username: str):
     console.print(f"[cyan]🕵️ Running Sherlock on:[/cyan] [bold]{username}[/bold]")
@@ -3284,3 +3341,4 @@ if __name__ == "__main__":
     # Step 5: In-memory log cleanup
     for category in pq_logger.logs:
         pq_logger.logs[category].clear()
+
