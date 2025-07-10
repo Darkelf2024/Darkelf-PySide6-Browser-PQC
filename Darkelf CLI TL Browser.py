@@ -83,10 +83,8 @@ import tls_client
 import html
 import ipaddress
 import dns.resolver
-import io
-import contextlib
 import phonenumbers
-from urllib.parse import quote_plus
+import textwrap
 from collections import deque
 from typing import Optional, List, Dict
 from datetime import datetime
@@ -98,16 +96,15 @@ from rich.rule import Rule
 from rich.align import Align
 from rich.table import Table
 from collections import defaultdict
-from urllib.parse import quote_plus, unquote, parse_qs, urlparse
+from textwrap import wrap
+from urllib.parse import quote_plus, unquote, parse_qs, urlparse, urljoin
 from bs4 import BeautifulSoup
 from oqs import KeyEncapsulation
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from dotenv import load_dotenv
 from requests import Response
-from dotenv import load_dotenv
 from phonenumbers import carrier, geocoder, timezone
 import requests
 
@@ -125,19 +122,6 @@ def get_tor_session():
         "https": "socks5h://127.0.0.1:9052",
     }
     return session
-
-load_dotenv()  # Loads HIBP_API_KEY from .env if present
-
-LAST_REQUEST_TIME = 0
-REQUEST_INTERVAL = 1.6  # seconds (adjust based on API limits)
-
-def safe_get(session, url, **kwargs) -> Response:
-    global LAST_REQUEST_TIME
-    elapsed = time.time() - LAST_REQUEST_TIME
-    if elapsed < REQUEST_INTERVAL:
-        time.sleep(REQUEST_INTERVAL - elapsed)
-    LAST_REQUEST_TIME = time.time()
-    return session.get(url, **kwargs)
 
 class EmailIntelPro:
     DISPOSABLE_DOMAINS = {
@@ -598,8 +582,7 @@ class DarkelfKernelMonitor(threading.Thread):
             except Exception:
                 results[key] = "ERROR"
         return results
-        
-# --- SecureBuffer: RAM-locked buffer for sensitive data ---
+
 class SecureBuffer:
     """
     RAM-locked buffer using mmap + mlock to prevent swapping.
@@ -608,17 +591,33 @@ class SecureBuffer:
     def __init__(self, size=4096):
         self.size = size
         self.buffer = mmap.mmap(-1, self.size)
-        libc = ctypes.CDLL("libc.so.6" if sys.platform.startswith("linux") else "libc.dylib")
-        result = libc.mlock(
-            ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.buffer))),
-            ctypes.c_size_t(self.size)
-        )
-        if result != 0:
-            raise RuntimeError("🔒 mlock failed: system may not allow locking memory")
+        self.locked = False
+        try:
+            libc_name = "libc.so.6" if sys.platform.startswith("linux") else "libc.dylib"
+            libc = ctypes.CDLL(libc_name)
+            result = libc.mlock(
+                ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.buffer))),
+                ctypes.c_size_t(self.size)
+            )
+            self.locked = (result == 0)
+        except Exception as e:
+            print(f"[SecureBuffer] mlock failed or not available: {e}")
+            self.locked = False
+
+        if not self.locked:
+            print("[SecureBuffer] Warning: buffer not locked in RAM! Your OS may not support mlock.")
 
     def write(self, data: bytes):
         self.buffer.seek(0)
-        self.buffer.write(data[:self.size])
+        # If data is shorter than buffer, fill the rest with zeros for security
+        data = data[:self.size]
+        self.buffer.write(data)
+        if len(data) < self.size:
+            self.buffer.write(b'\x00' * (self.size - len(data)))
+
+    def read(self) -> bytes:
+        self.buffer.seek(0)
+        return self.buffer.read(self.size)
 
     def zero(self):
         ctypes.memset(
@@ -630,6 +629,16 @@ class SecureBuffer:
     def close(self):
         self.zero()
         self.buffer.close()
+
+    def __del__(self):
+        # Always zero and close on deletion
+        try:
+            self.zero()
+            self.buffer.close()
+        except Exception:
+            pass
+            
+secure_buffer = SecureBuffer(size=4096)
 
 # --- MemoryMonitor: exit if memory low to avoid swap ---
 class MemoryMonitor(threading.Thread):
@@ -1670,16 +1679,15 @@ def print_help():
             ("genkeys",               "Generate post-quantum keys"),
             ("sendmsg",               "Encrypt & send a message"),
             ("recvmsg",               "Decrypt & show received message"),
-            ("tornew",                "Request new Tor circuit (if supported)"),
             ("checkip",               "Verify you're routed through Tor"),
             ("iplookup <ip>",         "Lookup IP address info"),
             ("tlsstatus",             "Show recent TLS Monitor activity"),
             ("beacon <.onion>",       "Check if a .onion site is reachable via Tor"),
             ("dnsleak",               "Run a dnsleak test"),
-            ("analyze! <url>",        "Analyze a URL for threat signals"),
+            ("analyze! <url>",        "Analyze a URL for threat trackers"),
             ("open <url>",            "Open and fetch a full URL (tracker-safe)"),
-            ("emailintel",            "Lookup Email Information"),
-            ("emailhunt",             "Gather Email and Links")
+            ("emailintel",            "Lookup MX Information"),
+            ("emailhunt",             "Collect Information")
         ]),
 
         ("Tools and Utilities", [
@@ -1923,54 +1931,88 @@ ensure_strong_entropy()
 
 console = Console()
 
+def get_key():
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        key = sys.stdin.read(1)
+        if key == '\x1b':
+            key += sys.stdin.read(2)
+        return key
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+def fetch_browser_page(url, debug=False):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (DarkelfCLI/3.0)"
+    }
+    proxies = {}
+    if ".onion" in url:
+        proxies = {
+            "http": "socks5h://127.0.0.1:9052",
+            "https": "socks5h://127.0.0.1:9052"
+        }
+    for attempt in range(3):
+        try:
+            response = requests.get(url, headers=headers, timeout=20, proxies=proxies)
+            response.raise_for_status()
+            return response.text, response.url
+        except requests.exceptions.RequestException as e:
+            if attempt == 2:
+                raise e
+            time.sleep(1)
+
+def make_clickable(text, url):
+    """Return a rich.Text with an OSC8 hyperlink if terminal supports."""
+    return Text(text, style=f"underline blue link {url}")
+
 class Page:
     def __init__(self, url):
         self.url = url
+        self.title = url
         self.lines = []
         self.links = []
         self.error = None
+        self.headings = []
         self.fetch()
 
     def fetch(self):
         try:
             html, _ = fetch_with_requests(self.url, debug=False)
             soup = BeautifulSoup(html, 'html.parser')
-
-            # Remove scripts/styles/noscript
             for s in soup(['script', 'style', 'noscript']):
                 s.decompose()
-
-            main_content = None
-            # Special case: Wikipedia homepage (central-featured) or article (mw-parser-output)
-            if "wikipedia.org" in self.url:
-                main = soup.find("div", class_="central-featured")
-                if main:
-                    main_content = main.get_text(separator='\n')
-                else:
-                    main = soup.find("div", class_="mw-parser-output")
-                    if main:
-                        main_content = main.get_text(separator='\n')
-            # Fallback: all <p> tags
-            if not main_content:
+            title_tag = soup.find('title')
+            if title_tag:
+                self.title = title_tag.get_text(strip=True)
+            # Gather headings for TOC
+            self.headings = []
+            for h in soup.find_all(['h1', 'h2', 'h3']):
+                self.headings.append(h.get_text(strip=True))
+            # Gather content lines
+            results = soup.select(".result")
+            if results:
+                self.lines = []
+                for result in results:
+                    title = result.select_one(".result__title")
+                    snippet = result.select_one(".result__snippet")
+                    if title:
+                        self.lines.append(title.get_text(strip=True))
+                    if snippet:
+                        self.lines.append(snippet.get_text(strip=True))
+                    self.lines.append("")
+            else:
+                # Insert a blank line after each paragraph for readability
                 ps = soup.find_all("p")
-                if ps:
-                    main_content = "\n".join(p.get_text(strip=True) for p in ps if p.get_text(strip=True))
-            # Fallback: all visible text
-            if not main_content or not main_content.strip():
-                main_content = soup.get_text(separator='\n')
-
-            # Clean up lines: remove empties/whitespace only
-            self.lines = [l.strip() for l in main_content.splitlines() if l.strip()]
+                main_content = "\n\n".join(p.get_text(strip=True) for p in ps if p.get_text(strip=True))
+                if not main_content:
+                    main_content = soup.get_text(separator='\n\n')
+                self.lines = [l.strip() for l in main_content.splitlines() if l.strip() or l == ""]
             if not self.lines:
                 self.lines = ["[dim]No content available.[/dim]"]
-
-            # Extract links as before
-            self.links = [
-                (i + 1, a.get_text(strip=True), a.get('href'))
-                for i, a in enumerate(soup.find_all('a'))
-            ]
-
-            # Annotate first occurrence of link text in the output
+            # Find all links, keep their order and number
+            self.links = [(i + 1, a.get_text(strip=True), a.get('href')) for i, a in enumerate(soup.find_all('a'))]
             for i, (num, label, _) in enumerate(self.links):
                 if label:
                     annotated = f"[{num}] {label}"
@@ -1978,7 +2020,6 @@ class Page:
                         if label in line:
                             self.lines[idx] = line.replace(label, annotated, 1)
                             break
-
         except Exception as e:
             self.error = str(e)
 
@@ -1988,174 +2029,371 @@ class DarkelfCLIBrowser:
         self.forward_stack = []
         self.current_page = None
         self.scroll = 0
+        self.tabs = []
+        self.active_tab = 0
+        self.height = max(12, shutil.get_terminal_size((80, 24)).lines - 2)
+        self.needs_render = True
+        self.page_size = 15  # lines per 'page' in paginated mode
+        self.help_mode = False
+        self.links_mode = False
+        self.quit = False
+        signal.signal(signal.SIGWINCH, self.on_resize)
 
-        term_height = shutil.get_terminal_size((80, 24)).lines
-        # Leave 8 lines for header/footer
-        self.height = max(12, term_height - 2)
+    def get_terminal_size(self):
+        return shutil.get_terminal_size((80, 24))
+
+    def on_resize(self, signum, frame):
+        self.needs_render = True
 
     def clear(self):
         os.system('clear' if os.name == 'posix' else 'cls')
 
+    def wrap_text(self, lines, width):
+        # Enhance: extra space after paragraph, bold headings, underline links
+        wrapped = []
+        for line in lines:
+            # Headings highlight
+            if line.isupper() and len(line) < 80:
+                wrapped.append(Text(line, style="bold yellow"))
+                wrapped.append("")
+                continue
+            if line.endswith(":") and len(line) < 80:
+                wrapped.append(Text(line, style="bold bright_cyan"))
+                wrapped.append("")
+                continue
+            if not line.strip():
+                wrapped.append("")  # keep explicit blank lines
+                continue
+            # If this is a numbered link, underline it
+            if line.strip().startswith("[") and "]" in line:
+                try:
+                    num = int(line.strip().split("]")[0][1:])
+                    wrapped.append(Text(line, style="underline blue"))
+                    wrapped.append("")
+                    continue
+                except Exception:
+                    pass
+            # Normal text
+            wrapped.extend(textwrap.wrap(line, width=width) or [""])
+            wrapped.append("")  # Add space after each paragraph
+        return wrapped
+
     def render(self):
         self.clear()
+        term_size = shutil.get_terminal_size((80, 24))
+        self.height = max(10, term_size.lines - 10)  # allow room for help/links panes
+        width = term_size.columns
+
+        if self.help_mode:
+            self.render_help(width)
+            return
+        if self.links_mode:
+            self.render_links(width)
+            return
 
         if not self.current_page:
-            console.print(Panel("[blue]No page loaded.[/blue]", title="Darkelf CLI Browser", border_style="blue"))
+            console.print(Panel("[blue]No page loaded.[/blue]", title="Darkelf CLI Browser", border_style="blue", width=width))
+            self.render_footer(width)  # <--- Add this
             return
 
-        # Header
-        url_display = self.current_page.url
-        if len(url_display) > 100:
-            url_display = url_display[:96] + "..."
-
-        header = Panel(
-            f"[bold cyan]Darkelf CLI Browser[/bold cyan]\n[blue underline]{url_display}[/blue underline]",
-            border_style="cyan",
-            padding=(1, 2),
-            expand=True
+        header_text = Text.assemble(
+            ("Darkelf CLI Browser", "bold cyan"),
+            f" | Tab {self.active_tab + 1}/{len(self.tabs)}\n",
+            (self.current_page.title or self.current_page.url, "blue underline")
         )
-        console.print(header)
+        console.print(Panel(header_text, border_style="cyan", padding=(1, 2), width=width))
 
-        # Error panel
-        if self.current_page.error:
-            console.print(Panel(f"[red]Error: {self.current_page.error}[/blue]", title="Page Error", border_style="blue"))
-            return
-
-        # Page content
-        visible_lines = self.current_page.lines[self.scroll:self.scroll + self.height]
-        if visible_lines:
-            page_text = "\n".join(visible_lines)
-            content = Text(page_text, style="white")
+        # Paginated display: show page_size lines at a time, use scroll as page index
+        total_lines = len(self.current_page.lines) if self.current_page and self.current_page.lines else 0
+        if total_lines:
+            start = self.scroll * self.page_size
+            end = min(start + self.page_size, total_lines)
+            visible_lines = self.current_page.lines[start:end]
         else:
-            content = Text("[dim]No content available.[/dim]", style="dim")
+            visible_lines = []
 
-        console.print(Panel(content, title="📰 Page Content", border_style="white", expand=True))
+        wrapped_lines = self.wrap_text(visible_lines, width - 4)
+        content = []
+        for w in wrapped_lines:
+            if isinstance(w, Text):
+                content.append(w)
+            else:
+                content.append(Text(w, style="white"))
+        console.print(Panel(Text.assemble(*content), title="\U0001f4f0 Page Content", border_style="white", width=width, expand=True))
 
-        # End-of-article marker
-        end_index = min(self.scroll + self.height, len(self.current_page.lines))
-        if end_index >= len(self.current_page.lines):
-            console.print("[dim]-- End of article --[/dim]")
+        # Pagination status
+        if self.current_page and self.current_page.lines:
+            total_pages = max(1, (len(self.current_page.lines) + self.page_size - 1) // self.page_size)
+            current_page = self.scroll + 1
+            status = f"-- Page {current_page}/{total_pages} --"
+            console.print(Align.right(Text(status, style="bold green"), width=width))
 
-        # Footer
+        self.render_footer(width)  # <--- Add this to always display footer!
+
+        # Tabs display (optional, below footer)
+        if self.tabs:
+            tabs_panel = Text.from_markup("[bold magenta]Open Tabs:[/bold magenta] ")
+            for i, tab in enumerate(self.tabs):
+                mark = "*" if i == self.active_tab else " "
+                tab_title = tab.title if hasattr(tab, "title") and tab.title else tab.url
+                style = "green" if i == self.active_tab else ""
+                tabs_panel.append(f"{i+1}. {tab_title} {mark}  ", style=style)
+            console.print(Align.center(tabs_panel, width=width))
+        
+    def render_footer(self, width):
+        console.print(Rule(style="grey30", characters="─"), width=width)
         footer = Text()
-        footer.append("↑/↓", style="bold blue")
-        footer.append(": Scroll  |  ")
-        footer.append("o", style="bold blue")
-        footer.append(": Open Link  |  ")
-        footer.append("u", style="bold blue")
-        footer.append(": URL  |  ")
-        footer.append("b", style="bold blue")
-        footer.append(": Back  |  ")
-        footer.append("q", style="bold blue")
-        footer.append(": Quit")
+        footer.append("[↑/↓/w/s/j/k] Prev/Next Page  ", style="bold green")
+        footer.append("[O] Open Link  ", style="bold cyan")
+        footer.append("[U] URL  ", style="bold magenta")
+        footer.append("[B] Back  ", style="bold yellow")
+        footer.append("[H] History  ", style="bold white")
+        footer.append("[T] Tabs  ", style="bold blue")
+        footer.append("[F] Search  ", style="bold green")
+        footer.append("[L] List Links  ", style="bold magenta")
+        footer.append("[E] Export Links  ", style="bold yellow")
+        footer.append("[?] Help  ", style="bold cyan")
+        footer.append("[Q] Quit", style="bold red")
+        console.print(Align.center(footer, width=width))
 
-        console.print(Rule(style="grey37"))
-        console.print(Align.center(footer))
-    
+    def render_help(self, width):
+        # Use Text.from_markup for all lines containing markup!
+        helptext = Text()
+        helptext.append(Text.from_markup("\n[bold cyan]Darkelf CLI Browser Help[/bold cyan]\n\n"))
+        helptext.append("[↑/↓/w/s/j/k] : Previous/next page (pagination)\n")
+        helptext.append("[O]           : Open link by number\n")
+        helptext.append("[U]           : Enter a URL\n")
+        helptext.append("[B]           : Back\n")
+        helptext.append("[H]           : Show history\n")
+        helptext.append("[T]           : Manage tabs\n")
+        helptext.append("[F]           : DuckDuckGo search\n")
+        helptext.append("[L]           : List all links on page\n")
+        helptext.append("[E]           : Export links to file\n")
+        helptext.append("[?]           : Show this help\n")
+        helptext.append("[Q]           : Quit and clear screen\n")
+        helptext.append(Text.from_markup("\n[bold magenta]Tips:[/bold magenta] Use [O] to open numbered links, [L] to see all links, and enjoy spaced, readable content!\n"))
+        console.print(Panel(helptext, title="Help", border_style="cyan", width=width))
+        self.render_footer(width)
+        console.print("\nPress any key to return.")
+        get_key()
+        self.help_mode = False
+        self.needs_render = True
+        
+    def export_links(self):
+        if not self.current_page or not self.current_page.links:
+            console.print("[red]No links to export.[/red]")
+            return
+        filename = f"darkelf_links_{int(time.time())}.txt"
+        with open(filename, "w", encoding="utf-8") as f:
+            for num, label, href in self.current_page.links:
+                f.write(f"{num}. {label} - {href}\n")
+        console.print(f"[green]Links exported to {filename}[/green]")
+        
+    def render_links(self, width):
+        table = Table(title="Links on Current Page", show_lines=True, box=None, expand=True)
+        table.add_column("#", style="cyan", width=6)
+        table.add_column("Label", style="bold green")
+        table.add_column("URL", style="blue")
+        if self.current_page and self.current_page.links:
+            for num, label, href in self.current_page.links:
+                if href and href.startswith("http"):
+                    label_text = make_clickable(label, href)
+                    table.add_row(str(num), label_text, href)
+                else:
+                    table.add_row(str(num), label, href if href else "")
+        else:
+            table.add_row("-", "No links found", "")
+        console.print(table)
+        self.render_footer(width)
+        console.print("\n[O] Open link by number | [E] Export links | Any key to return.")
+
+        key = get_key().lower()
+        if key == "o":
+            try:
+                num = int(input("Open link #: ").strip())
+                # Check if link number exists
+                link_nums = [n for n, _, _ in self.current_page.links]
+                if num in link_nums:
+                    self.open_link(num)
+                    # After opening, exit links mode and render new page
+                    self.links_mode = False
+                    self.needs_render = True
+                    return  # Immediately return to allow run() loop to render
+                else:
+                    console.print(f"[red]Invalid link number: {num}[/red]")
+                    time.sleep(1)
+                    self.needs_render = True  # Stay in links mode
+            except Exception:
+                console.print("[red]Invalid input.[/red]")
+                time.sleep(1)
+                self.needs_render = True  # Stay in links mode
+            # Stay in links mode for another round
+        elif key == "e":
+            self.export_links()
+            self.links_mode = False
+            self.needs_render = True
+        else:
+            self.links_mode = False
+            self.needs_render = True
 
     def visit(self, url):
-        if self.current_page:
-            self.history.append(self.current_page.url)
-
-        self.scroll = 0
-        self.forward_stack.clear()
-        self.current_page = Page(url)
-        self.render()
+        try:
+            if self.current_page:
+                self.history.append(self.current_page.url)
+            self.scroll = 0
+            self.forward_stack.clear()
+            self.current_page = Page(url)
+            if len(self.tabs) <= self.active_tab:
+                self.tabs.append(self.current_page)
+            else:
+                self.tabs[self.active_tab] = self.current_page
+            self.needs_render = True
+        except Exception as e:
+            self.current_page = Page("data:text/html,<html><body><p>Failed to load page</p></body></html>")
+            self.current_page.error = str(e)
+            self.needs_render = True
 
     def open_link(self, number):
         try:
-            link = dict((num, href) for num, _, href in self.current_page.links)[number]
-            if link:
-                if not link.startswith("http"):
-                    from urllib.parse import urljoin
-                    link = urljoin(self.current_page.url, link)
-                self.visit(link)
-        except:
-            pass
-            
+            if not self.current_page or not self.current_page.links:
+                return
+            link_map = dict((num, href) for num, _, href in self.current_page.links)
+            href = link_map.get(number)
+            if not href:
+                return
+            if href.startswith("/l/?uddg="):
+                qs = urlparse(href).query
+                resolved = parse_qs(qs).get("uddg", [""])[0]
+                href = unquote(resolved)
+            if not href.startswith("http"):
+                href = urljoin(self.current_page.url, href)
+            self.visit(href)
+        except Exception as e:
+            console.print(f"[red]Error opening link: {e}[/red]")
+
+    def show_history(self):
+        width = shutil.get_terminal_size((80, 24)).columns
+        if not self.history:
+            console.print("[green]No browsing history available.[/green]")
+        else:
+            table = Table(title="History", show_lines=True, box=None, expand=True)
+            table.add_column("#", style="cyan", width=6)
+            table.add_column("URL", style="blue")
+            for i, url in enumerate(reversed(self.history[-20:]), 1):
+                table.add_row(str(i), url)
+            console.print(table)
+        self.render_footer(width)
+        console.print("\nPress any key to return.")
+        get_key()
+        self.needs_render = True
+
+    def manage_tabs(self):
+        if not self.tabs:
+            console.print("[grey]No open tabs.[/grey]")
+            return
+        console.print("[bold magenta]Open Tabs:[/bold magenta]")
+        for i, tab in enumerate(self.tabs):
+            mark = "*" if i == self.active_tab else " "
+            console.print(f" {i+1}. {tab.url} {mark}")
+        user_input = input("\nEnter tab number or 'x' to close tab: ").strip()
+        if user_input.lower() == 'x':
+            self.tabs.pop(self.active_tab)
+            if self.tabs:
+                self.active_tab = max(0, self.active_tab - 1)
+                self.current_page = self.tabs[self.active_tab]
+            else:
+                self.active_tab = 0
+                self.current_page = None
+                self.scroll = 0
+        elif user_input.isdigit():
+            idx = int(user_input) - 1
+            if 0 <= idx < len(self.tabs):
+                self.active_tab = idx
+                self.current_page = self.tabs[idx]
+        self.needs_render = True
+
+    def simulate_search_prompt(self):
+        console.print("\n[bold cyan]Search DuckDuckGo:[/bold cyan]", end=" ")
+        query = input().strip()
+        if query:
+            encoded_query = requests.utils.quote(query)
+            url = f"https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/html/?q={encoded_query}"
+            self.visit(url)
+            if self.current_page:
+                self.current_page.title = f"Search DuckDuckGo: {query}"
+            self.needs_render = True
+
+    def secure_wipe(self):
+        self.history.clear()
+        self.tabs.clear()
+        self.forward_stack.clear()
+        self.current_page = None
+        self.scroll = 0
+        self.help_mode = False
+        self.links_mode = False
+        # Wipe SecureBuffer
+        secure_buffer.zero()
+        secure_buffer.close()
+        
     def run(self):
-        self.visit("https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite")
-        while True:
-            key = get_key()
+        self.needs_render = True
+        self.simulate_search_prompt()
+        while not self.quit:
+            if self.needs_render:
+                self.render()
+                self.needs_render = False
+            key = get_key().lower()
             if key in ('q', 'Q'):
+                self.quit = True
                 break
-            elif key in ('\x1b[A', 'w'):
-                if self.scroll > 0:
+            elif key in ('\x1b[A', 'w', 'k'):
+                # Prev page
+                if self.current_page and self.scroll > 0:
                     self.scroll -= 1
-                    self.render()
-            elif key in ('\x1b[B', 's'):
-                if self.scroll + self.height < len(self.current_page.lines):
-                    self.scroll += 1
-                    self.render()
-            elif key == 'u':
-                console.print("\nEnter URL: ", end="")
-                console.print("[bold green]>>[/bold green] ", end="")
-                url = input().strip()
+                    self.needs_render = True
+            elif key in ('\x1b[B', 's', 'j'):
+                # Next page
+                if self.current_page and self.current_page.lines:
+                    total_pages = max(1, (len(self.current_page.lines) + self.page_size - 1) // self.page_size)
+                    if self.scroll + 1 < total_pages:
+                        self.scroll += 1
+                        self.needs_render = True
+            elif key in ('u',):
+                url = input("\nEnter URL: ").strip()
                 if not url:
                     continue
                 if not url.startswith(("http://", "https://")):
                     url = "https://" + url
                 self.visit(url)
-            elif key == 'b':
+            elif key in ('b',):
                 if self.history:
                     url = self.history.pop()
-                    self.forward_stack.append(self.current_page.url)
+                    if self.current_page:
+                        self.forward_stack.append(self.current_page.url)
                     self.visit(url)
-            elif key == 'o':
+            elif key in ('o',):
                 try:
-                    console.print("[bold green]>>[/bold green] ", end="")
-                    user_input = input()
-                    num = int(user_input)
+                    num = int(input("Open link #: "))
                     self.open_link(num)
-                except:
+                except Exception:
                     pass
-
-def interactive_prompt():
-
-    buffer = []
-    history = deque([], maxlen=100)
-    cursor = 0
-
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        console.print("[bold green]>>[/bold green] ", end="", soft_wrap=True)
-        sys.stdout.flush()
-
-        while True:
-            key = sys.stdin.read(1)
-            if key == '\x1b':
-                key += sys.stdin.read(2)
-
-            if key == '\r':  # Enter
-                print()
-                cmd = ''.join(buffer)
-                history.append(cmd)
-                return cmd
-
-            elif key == '\x7f':  # Backspace
-                if buffer:
-                    buffer.pop()
-                    cursor -= 1
-                    print('\b \b', end='', flush=True)
-
-            elif key == '\x1b[A':  # Up (history stub)
-                pass
-            elif key == '\x1b[B':  # Down
-                pass
-            elif key == '\x1b[C':  # Right
-                pass
-            elif key == '\x1b[D':  # Left
-                pass
-            else:
-                buffer.append(key)
-                print(key, end='', flush=True)
-                cursor += 1
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        
-console = Console()
+            elif key in ('h',):
+                self.show_history()
+                self.needs_render = True
+            elif key in ('t',):
+                self.manage_tabs()
+            elif key in ('f',):
+                self.simulate_search_prompt()
+            elif key in ('?',):
+                self.help_mode = True
+                self.needs_render = True
+            elif key in ('l',):
+                self.links_mode = True
+                self.needs_render = True
+        # Wipe screen and exit
+        self.secure_wipe()
+        self.clear()
+        sys.exit(0)
 
 class DarkelfUtils:
     DUCKDUCKGO_LITE = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
