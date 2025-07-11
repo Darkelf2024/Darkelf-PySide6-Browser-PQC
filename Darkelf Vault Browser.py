@@ -83,6 +83,7 @@ import ssl
 import struct
 import zlib
 import nacl.public
+import ctypes.util
 from nacl.public import PrivateKey, PublicKey
 from nacl.exceptions import CryptoError
 from typing import Optional, List, Dict
@@ -150,70 +151,6 @@ from PyQt5.QtCore import (
 )
 
 # This is placed here - I will be integrating the second phase later this week plugging into Darkelf Class: I am running tests getting it production ready!
-class DarkelfMessenger:
-    def __init__(self):
-        self.kem_algo = "ML-KEM-768"
-
-    def generate_keys(self):
-        kem = KeyEncapsulation(self.kem_algo)
-        pub = kem.generate_keypair()
-        with open("my_pubkey.bin", "wb") as f:
-            f.write(pub)
-        with open("my_privkey.bin", "wb") as f:
-            f.write(kem.export_secret_key())
-        print("🔐 Keys created: my_pubkey.bin / my_privkey.bin")
-
-    def send_message(self, recipient_pubkey_path, message_text, output_path="msg.dat"):
-        kem = KeyEncapsulation(self.kem_algo)
-        with open(recipient_pubkey_path, "rb") as f:
-            pubkey = f.read()
-        ciphertext, shared_secret = kem.encap_secret(pubkey)
-        key = base64.urlsafe_b64encode(shared_secret[:32])
-        token = Fernet(key).encrypt(message_text.encode())
-        with open(output_path, "wb") as f:
-            f.write(ciphertext + b'||' + token)
-        print("📤 Message encrypted →", output_path)
-
-    def receive_message(self, my_privkey_path="my_privkey.bin", msg_path="msg.dat"):
-        kem = KeyEncapsulation(self.kem_algo)
-        with open(my_privkey_path, "rb") as f:
-            kem.import_secret_key(f.read())
-        with open(msg_path, "rb") as f:
-            ciphertext, token = f.read().split(b'||')
-        shared_secret = kem.decap_secret(ciphertext)
-        key = base64.urlsafe_b64encode(shared_secret[:32])
-        message = Fernet(key).decrypt(token)
-        print("📥 Message decrypted →", message.decode())
-        return message.decode()
-
-    def deliver_over_tor(self, onion_url="http://exampleonion/upload", msg_path="msg.dat"):
-        try:
-            proxies = {
-                'http': 'socks5h://127.0.0.1:9052',
-                'https': 'socks5h://127.0.0.1:9052',
-            }
-            with open(msg_path, "rb") as f:
-                files = {'file': f}
-                r = requests.post(onion_url, files=files, proxies=proxies, timeout=15)
-                print("🚀 Sent via Tor:", r.status_code)
-        except Exception as e:
-            print("❌ Tor delivery failed:", e)
-
-def start_message_watcher():
-    def watch():
-        messenger = DarkelfMessenger()
-        while True:
-            if os.path.exists("msg.dat"):
-                try:
-                    msg = messenger.receive_message()
-                    print("📨 [Auto Received]:", msg)
-                    os.remove("msg.dat")
-                except Exception as e:
-                    print("⚠️ Message receive failed:", e)
-            time.sleep(5)
-
-    threading.Thread(target=watch, daemon=True).start()
-
 class DarkelfKernelMonitor(threading.Thread):
     """
     Monitors kernel state and flags forensic-risk activity (e.g., swap use).
@@ -468,38 +405,62 @@ class DarkelfTLSMonitorJA3:
 # 🔐 SecureBuffer + 🧠 MemoryMonitor (Embedded for Darkelf Browser)
 
 class SecureBuffer:
-    """
-    RAM-locked buffer using mmap + mlock to prevent swapping.
-    Use for sensitive in-memory data like session tokens, keys, etc.
-    """
     def __init__(self, size=4096):
         self.size = size
         self.buffer = mmap.mmap(-1, self.size)
+        self.locked = False
+        self._lock_memory()
 
-        # Lock memory into RAM using mlock (macOS-compatible)
-        libc = ctypes.CDLL("libc.dylib")
-        result = libc.mlock(
-            ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.buffer))),
-            ctypes.c_size_t(self.size)
-        )
-        if result != 0:
-            raise RuntimeError("🔒 mlock failed: system may not allow locking memory")
+    def _lock_memory(self):
+        try:
+            if sys.platform.startswith("win"):
+                self.locked = ctypes.windll.kernel32.VirtualLock(
+                    ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.buffer))),
+                    ctypes.c_size_t(self.size)
+                )
+            else:
+                libc_name = ctypes.util.find_library("c")
+                libc = ctypes.CDLL(libc_name)
+                if hasattr(libc, "madvise"):
+                    libc.madvise(
+                        ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.buffer))),
+                        ctypes.c_size_t(self.size),
+                        16  # MADV_DONTDUMP
+                    )
+                self.locked = (libc.mlock(
+                    ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.buffer))),
+                    ctypes.c_size_t(self.size)
+                ) == 0)
+        except Exception as e:
+            print(f"[SecureBuffer] Lock failed: {e}")
+            self.locked = False
 
     def write(self, data: bytes):
         self.buffer.seek(0)
-        self.buffer.write(data[:self.size])
+        data = data[:self.size]
+        self.buffer.write(data)
+        if len(data) < self.size:
+            self.buffer.write(b'\x00' * (self.size - len(data)))
+
+    def read(self) -> bytes:
+        self.buffer.seek(0)
+        return self.buffer.read(self.size)
 
     def zero(self):
-        # Securely zero memory
-        ctypes.memset(
-            ctypes.addressof(ctypes.c_char.from_buffer(self.buffer)),
-            0,
-            self.size
-        )
+        self.buffer.seek(0)
+        self.buffer.write(secrets.token_bytes(self.size))
+        self.buffer.seek(0)
+        self.buffer.write(b"\x00" * self.size)
 
     def close(self):
         self.zero()
         self.buffer.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
 class MemoryMonitor(threading.Thread):
     """
