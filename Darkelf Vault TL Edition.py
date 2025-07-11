@@ -83,6 +83,7 @@ import ssl
 import struct
 import zlib
 import nacl.public
+import ctypes.util
 from nacl.public import PrivateKey, PublicKey
 from nacl.exceptions import CryptoError
 from typing import Optional, List, Dict
@@ -466,40 +467,63 @@ class DarkelfTLSMonitorJA3:
         print("[DarkelfAI] 🛑 TLS Monitor stopped.")
         
 # 🔐 SecureBuffer + 🧠 MemoryMonitor (Embedded for Darkelf Browser)
-
 class SecureBuffer:
-    """
-    RAM-locked buffer using mmap + mlock to prevent swapping.
-    Use for sensitive in-memory data like session tokens, keys, etc.
-    """
     def __init__(self, size=4096):
         self.size = size
         self.buffer = mmap.mmap(-1, self.size)
+        self.locked = False
+        self._lock_memory()
 
-        # Lock memory into RAM using mlock (macOS-compatible)
-        libc = ctypes.CDLL("libc.dylib")
-        result = libc.mlock(
-            ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.buffer))),
-            ctypes.c_size_t(self.size)
-        )
-        if result != 0:
-            raise RuntimeError("🔒 mlock failed: system may not allow locking memory")
+    def _lock_memory(self):
+        try:
+            if sys.platform.startswith("win"):
+                self.locked = ctypes.windll.kernel32.VirtualLock(
+                    ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.buffer))),
+                    ctypes.c_size_t(self.size)
+                )
+            else:
+                libc_name = ctypes.util.find_library("c")
+                libc = ctypes.CDLL(libc_name)
+                if hasattr(libc, "madvise"):
+                    libc.madvise(
+                        ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.buffer))),
+                        ctypes.c_size_t(self.size),
+                        16  # MADV_DONTDUMP
+                    )
+                self.locked = (libc.mlock(
+                    ctypes.c_void_p(ctypes.addressof(ctypes.c_char.from_buffer(self.buffer))),
+                    ctypes.c_size_t(self.size)
+                ) == 0)
+        except Exception as e:
+            print(f"[SecureBuffer] Lock failed: {e}")
+            self.locked = False
 
     def write(self, data: bytes):
         self.buffer.seek(0)
-        self.buffer.write(data[:self.size])
+        data = data[:self.size]
+        self.buffer.write(data)
+        if len(data) < self.size:
+            self.buffer.write(b'\x00' * (self.size - len(data)))
+
+    def read(self) -> bytes:
+        self.buffer.seek(0)
+        return self.buffer.read(self.size)
 
     def zero(self):
-        # Securely zero memory
-        ctypes.memset(
-            ctypes.addressof(ctypes.c_char.from_buffer(self.buffer)),
-            0,
-            self.size
-        )
+        self.buffer.seek(0)
+        self.buffer.write(secrets.token_bytes(self.size))
+        self.buffer.seek(0)
+        self.buffer.write(b"\x00" * self.size)
 
     def close(self):
         self.zero()
         self.buffer.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
 class MemoryMonitor(threading.Thread):
     """
