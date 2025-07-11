@@ -106,6 +106,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from requests import Response
 from phonenumbers import carrier, geocoder, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 
 # --- Tor integration via Stem ---
@@ -1992,33 +1993,50 @@ class Page:
                 self.headings.append(h.get_text(strip=True))
             # Gather content lines
             results = soup.select(".result")
+            fancy_divider = "═" * 40  # Fancy divider line
             if results:
                 self.lines = []
-                for result in results:
+                for idx, result in enumerate(results):
                     title = result.select_one(".result__title")
                     snippet = result.select_one(".result__snippet")
+                    link = result.find("a", href=True)
+                    # Add paragraph with colored number for each result
                     if title:
-                        self.lines.append(title.get_text(strip=True))
+                        self.lines.append((f"[{idx+1}]", title.get_text(strip=True)))
                     if snippet:
-                        self.lines.append(snippet.get_text(strip=True))
-                    self.lines.append("")
+                        self.lines.append(("", snippet.get_text(strip=True)))
+                    if link:
+                        self.lines.append(("", link['href']))
+                    # Fancy divider after each result
+                    self.lines.append((None, fancy_divider))
             else:
-                # Insert a blank line after each paragraph for readability
-                ps = soup.find_all("p")
-                main_content = "\n\n".join(p.get_text(strip=True) for p in ps if p.get_text(strip=True))
-                if not main_content:
+                # Fallback: full HTML text as spaced sections
+                self.lines = []
+                for idx, p in enumerate(soup.find_all("p")):
+                    text = p.get_text(strip=True)
+                    if text:
+                        self.lines.append((f"[{idx+1}]", text))
+                        self.lines.append((None, fancy_divider))
+                # If no <p>, fallback to generic splitting
+                if not self.lines:
                     main_content = soup.get_text(separator='\n\n')
-                self.lines = [l.strip() for l in main_content.splitlines() if l.strip() or l == ""]
+                    paragraphs = [p.strip() for p in main_content.split('\n\n') if p.strip()]
+                    for idx, paragraph in enumerate(paragraphs):
+                        self.lines.append((f"[{idx+1}]", paragraph))
+                        self.lines.append((None, fancy_divider))
+                # Remove trailing divider if present
+                if self.lines and self.lines[-1][1] == fancy_divider:
+                    self.lines.pop()
             if not self.lines:
-                self.lines = ["[dim]No content available.[/dim]"]
+                self.lines = [(None, "[dim]No content available.[/dim]")]
             # Find all links, keep their order and number
             self.links = [(i + 1, a.get_text(strip=True), a.get('href')) for i, a in enumerate(soup.find_all('a'))]
             for i, (num, label, _) in enumerate(self.links):
                 if label:
                     annotated = f"[{num}] {label}"
-                    for idx, line in enumerate(self.lines):
+                    for idx, (n, line) in enumerate(self.lines):
                         if label in line:
-                            self.lines[idx] = line.replace(label, annotated, 1)
+                            self.lines[idx] = (n, line.replace(label, annotated, 1))
                             break
         except Exception as e:
             self.error = str(e)
@@ -2049,10 +2067,18 @@ class DarkelfCLIBrowser:
         os.system('clear' if os.name == 'posix' else 'cls')
 
     def wrap_text(self, lines, width):
-        # Enhance: extra space after paragraph, bold headings, underline links
+        fancy_divider = "═" * (width - 4)
         wrapped = []
-        for line in lines:
-            # Headings highlight
+        for pair in lines:
+            number, line = pair if isinstance(pair, tuple) else (None, pair)
+            if line.strip() == "═" * 40 or line.strip() == fancy_divider:
+                wrapped.append(Text(" ", style="white"))
+                wrapped.append(Text(fancy_divider, style="bold magenta"))
+                wrapped.append(Text(" ", style="white"))
+                continue
+            if not line.strip():
+                wrapped.append("")
+                continue
             if line.isupper() and len(line) < 80:
                 wrapped.append(Text(line, style="bold yellow"))
                 wrapped.append("")
@@ -2061,10 +2087,13 @@ class DarkelfCLIBrowser:
                 wrapped.append(Text(line, style="bold bright_cyan"))
                 wrapped.append("")
                 continue
-            if not line.strip():
-                wrapped.append("")  # keep explicit blank lines
+            if number and number.startswith("[") and "]" in number:
+                text_obj = Text()
+                text_obj.append(number + " ", style="bold cyan")
+                text_obj.append(line, style="blue")
+                wrapped.append(text_obj)
+                wrapped.append("")
                 continue
-            # If this is a numbered link, underline it
             if line.strip().startswith("[") and "]" in line:
                 try:
                     num = int(line.strip().split("]")[0][1:])
@@ -2073,15 +2102,13 @@ class DarkelfCLIBrowser:
                     continue
                 except Exception:
                     pass
-            # Normal text
             wrapped.extend(textwrap.wrap(line, width=width) or [""])
-            wrapped.append("")  # Add space after each paragraph
         return wrapped
 
     def render(self):
         self.clear()
         term_size = shutil.get_terminal_size((80, 24))
-        self.height = max(10, term_size.lines - 10)  # allow room for help/links panes
+        self.height = max(10, term_size.lines - 10)
         width = term_size.columns
 
         if self.help_mode:
@@ -2093,7 +2120,7 @@ class DarkelfCLIBrowser:
 
         if not self.current_page:
             console.print(Panel("[blue]No page loaded.[/blue]", title="Darkelf CLI Browser", border_style="blue", width=width))
-            self.render_footer(width)  # <--- Add this
+            self.render_footer(width)
             return
 
         header_text = Text.assemble(
@@ -2103,7 +2130,6 @@ class DarkelfCLIBrowser:
         )
         console.print(Panel(header_text, border_style="cyan", padding=(1, 2), width=width))
 
-        # Paginated display: show page_size lines at a time, use scroll as page index
         total_lines = len(self.current_page.lines) if self.current_page and self.current_page.lines else 0
         if total_lines:
             start = self.scroll * self.page_size
@@ -2121,16 +2147,14 @@ class DarkelfCLIBrowser:
                 content.append(Text(w, style="white"))
         console.print(Panel(Text.assemble(*content), title="\U0001f4f0 Page Content", border_style="white", width=width, expand=True))
 
-        # Pagination status
         if self.current_page and self.current_page.lines:
             total_pages = max(1, (len(self.current_page.lines) + self.page_size - 1) // self.page_size)
             current_page = self.scroll + 1
             status = f"-- Page {current_page}/{total_pages} --"
             console.print(Align.right(Text(status, style="bold green"), width=width))
 
-        self.render_footer(width)  # <--- Add this to always display footer!
+        self.render_footer(width)
 
-        # Tabs display (optional, below footer)
         if self.tabs:
             tabs_panel = Text.from_markup("[bold magenta]Open Tabs:[/bold magenta] ")
             for i, tab in enumerate(self.tabs):
@@ -2139,7 +2163,7 @@ class DarkelfCLIBrowser:
                 style = "green" if i == self.active_tab else ""
                 tabs_panel.append(f"{i+1}. {tab_title} {mark}  ", style=style)
             console.print(Align.center(tabs_panel, width=width))
-        
+
     def render_footer(self, width):
         console.print(Rule(style="grey30", characters="─"), width=width)
         footer = Text()
@@ -2157,7 +2181,19 @@ class DarkelfCLIBrowser:
         console.print(Align.center(footer, width=width))
 
     def render_help(self, width):
-        # Use Text.from_markup for all lines containing markup!
+        if self.current_page:
+            header_text = Text.assemble(
+                ("Darkelf CLI Browser", "bold cyan"),
+                f" | Tab {self.active_tab + 1}/{len(self.tabs)}\n",
+                (self.current_page.title or self.current_page.url, "blue underline")
+            )
+        else:
+            header_text = Text.assemble(
+                ("Darkelf CLI Browser", "bold cyan"),
+                " | No Tab\n",
+                ("No Page Loaded", "blue underline")
+            )
+        console.print(Panel(header_text, border_style="cyan", padding=(1, 2), width=width))
         helptext = Text()
         helptext.append(Text.from_markup("\n[bold cyan]Darkelf CLI Browser Help[/bold cyan]\n\n"))
         helptext.append("[↑/↓/w/s/j/k] : Previous/next page (pagination)\n")
@@ -2178,7 +2214,7 @@ class DarkelfCLIBrowser:
         get_key()
         self.help_mode = False
         self.needs_render = True
-        
+
     def export_links(self):
         if not self.current_page or not self.current_page.links:
             console.print("[red]No links to export.[/red]")
@@ -2188,21 +2224,41 @@ class DarkelfCLIBrowser:
             for num, label, href in self.current_page.links:
                 f.write(f"{num}. {label} - {href}\n")
         console.print(f"[green]Links exported to {filename}[/green]")
-        
+
     def render_links(self, width):
-        table = Table(title="Links on Current Page", show_lines=True, box=None, expand=True)
-        table.add_column("#", style="cyan", width=6)
-        table.add_column("Label", style="bold green")
-        table.add_column("URL", style="blue")
-        if self.current_page and self.current_page.links:
-            for num, label, href in self.current_page.links:
-                if href and href.startswith("http"):
-                    label_text = make_clickable(label, href)
-                    table.add_row(str(num), label_text, href)
-                else:
-                    table.add_row(str(num), label, href if href else "")
+        if self.current_page:
+            header_text = Text.assemble(
+                ("Darkelf CLI Browser", "bold cyan"),
+                f" | Tab {self.active_tab + 1}/{len(self.tabs)}\n",
+                (self.current_page.title or self.current_page.url, "blue underline")
+            )
         else:
-            table.add_row("-", "No links found", "")
+            header_text = Text.assemble(
+                ("Darkelf CLI Browser", "bold cyan"),
+                " | No Tab\n",
+                ("No Page Loaded", "blue underline")
+            )
+        console.print(Panel(header_text, border_style="cyan", padding=(1, 2), width=width))
+
+        seen_urls = set()
+        deduped_links = []
+        for num, label, href in self.current_page.links:
+            if href and href not in seen_urls:
+                deduped_links.append((num, label, href))
+                seen_urls.add(href)
+        fancy_divider = "═" * (width - 4)
+        table = Table(show_header=False, box=None, expand=True)
+        table.add_column("Result", style="white", ratio=1)
+        if deduped_links:
+            for num, label, href in deduped_links:
+                link_text = Text()
+                link_text.append(f"[{num}] ", style="bold cyan")
+                link_text.append(label + "\n", style="bold green")
+                link_text.append(href, style="blue underline link " + href)
+                table.add_row(link_text)
+                table.add_row(Text(fancy_divider, style="bold magenta"))
+        else:
+            table.add_row(Text("No links found", style="yellow"))
         console.print(table)
         self.render_footer(width)
         console.print("\n[O] Open link by number | [E] Export links | Any key to return.")
@@ -2211,27 +2267,52 @@ class DarkelfCLIBrowser:
         if key == "o":
             try:
                 num = int(input("Open link #: ").strip())
-                # Check if link number exists
-                link_nums = [n for n, _, _ in self.current_page.links]
-                if num in link_nums:
-                    self.open_link(num)
-                    # After opening, exit links mode and render new page
+                link_dict = {n: href for n, _, href in deduped_links}
+                if num in link_dict:
+                    href = link_dict[num]
+                    if href.startswith("/l/?uddg="):
+                        parsed = urlparse(href)
+                        qs = parse_qs(parsed.query)
+                        resolved = qs.get("uddg", [""])[0]
+                        href = unquote(resolved)
+                    if not href.startswith("http"):
+                        href = "https://" + href.lstrip("/")
                     self.links_mode = False
                     self.needs_render = True
-                    return  # Immediately return to allow run() loop to render
+                    self.visit(href)
+                    return
                 else:
                     console.print(f"[red]Invalid link number: {num}[/red]")
                     time.sleep(1)
-                    self.needs_render = True  # Stay in links mode
-            except Exception:
-                console.print("[red]Invalid input.[/red]")
+                    self.needs_render = True
+            except Exception as err:
+                console.print(f"[red]Invalid input: {err}[/red]")
                 time.sleep(1)
-                self.needs_render = True  # Stay in links mode
-            # Stay in links mode for another round
+                self.needs_render = True
         elif key == "e":
             self.export_links()
             self.links_mode = False
             self.needs_render = True
+        elif key.isdigit():
+            num = int(key)
+            link_dict = {n: href for n, _, href in deduped_links}
+            if num in link_dict:
+                href = link_dict[num]
+                if href.startswith("/l/?uddg="):
+                    parsed = urlparse(href)
+                    qs = parse_qs(parsed.query)
+                    resolved = qs.get("uddg", [""])[0]
+                    href = unquote(resolved)
+                if not href.startswith("http"):
+                    href = "https://" + href.lstrip("/")
+                self.links_mode = False
+                self.needs_render = True
+                self.visit(href)
+                return
+            else:
+                console.print(f"[red]Invalid link number: {num}[/red]")
+                time.sleep(1)
+                self.needs_render = True
         else:
             self.links_mode = False
             self.needs_render = True
@@ -2256,18 +2337,30 @@ class DarkelfCLIBrowser:
     def open_link(self, number):
         try:
             if not self.current_page or not self.current_page.links:
+                console.print("[red]No links available on this page.[/red]")
                 return
             link_map = dict((num, href) for num, _, href in self.current_page.links)
             href = link_map.get(number)
             if not href:
+                console.print(f"[red]No link found for number: {number}[/red]")
                 return
             if href.startswith("/l/?uddg="):
                 qs = urlparse(href).query
                 resolved = parse_qs(qs).get("uddg", [""])[0]
+                if not resolved:
+                    console.print(f"[red]DuckDuckGo redirect did not resolve for {href}[/red]")
+                    return
                 href = unquote(resolved)
             if not href.startswith("http"):
                 href = urljoin(self.current_page.url, href)
-            self.visit(href)
+            # Show loading message for better UX
+            console.print(f"[yellow]Opening link #{number}: {href}[/yellow]")
+            try:
+                self.visit(href)
+            except Exception as e:
+                console.print(f"[red]Network or fetch error: {e}[/red]")
+                return
+            self.needs_render = True  # Force redraw
         except Exception as e:
             console.print(f"[red]Error opening link: {e}[/red]")
 
@@ -2331,28 +2424,29 @@ class DarkelfCLIBrowser:
         self.scroll = 0
         self.help_mode = False
         self.links_mode = False
-        # Wipe SecureBuffer
         secure_buffer.zero()
         secure_buffer.close()
-        
+
     def run(self):
         self.needs_render = True
         self.simulate_search_prompt()
         while not self.quit:
-            if self.needs_render:
+            while self.needs_render:
                 self.render()
                 self.needs_render = False
+                if not self.links_mode and not self.help_mode and self.current_page:
+                    continue
+                break
+
             key = get_key().lower()
             if key in ('q', 'Q'):
                 self.quit = True
                 break
             elif key in ('\x1b[A', 'w', 'k'):
-                # Prev page
                 if self.current_page and self.scroll > 0:
                     self.scroll -= 1
                     self.needs_render = True
             elif key in ('\x1b[B', 's', 'j'):
-                # Next page
                 if self.current_page and self.current_page.lines:
                     total_pages = max(1, (len(self.current_page.lines) + self.page_size - 1) // self.page_size)
                     if self.scroll + 1 < total_pages:
@@ -2377,6 +2471,9 @@ class DarkelfCLIBrowser:
                     self.open_link(num)
                 except Exception:
                     pass
+            elif key.isdigit():
+                num = int(key)
+                self.open_link(num)
             elif key in ('h',):
                 self.show_history()
                 self.needs_render = True
@@ -2390,29 +2487,27 @@ class DarkelfCLIBrowser:
             elif key in ('l',):
                 self.links_mode = True
                 self.needs_render = True
-        # Wipe screen and exit
         self.secure_wipe()
         self.clear()
         sys.exit(0)
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 class DarkelfUtils:
     DUCKDUCKGO_LITE = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
+    DUCKDUCKGO_HTML = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/html"
     TOR_PROXY = {
         "http": "socks5h://127.0.0.1:9052",
         "https": "socks5h://127.0.0.1:9052"
     }
+    DORK_THREADS = 2   # Number of threads for dorking
+    FETCH_THREADS = 2  # Number of threads for fetching URLs
 
     def __init__(self):
         pass
-        
-    def generate_duckduckgo_dorks(self, query):
-        """
-        Generates advanced DuckDuckGo dork-style queries for OSINT scanning.
-        Works for emails, usernames, phone numbers, and domains.
-        """
-        dorks = []
 
-        # Email
+    def generate_duckduckgo_dorks(self, query):
+        dorks = []
         if "@" in query:
             dorks += [
                 f'"{query}" site:pastebin.com',
@@ -2425,8 +2520,6 @@ class DarkelfUtils:
                 f'"{query}" site:medium.com',
                 f'"{query}" site:archive.org',
             ]
-
-        # Phone Number
         elif query.startswith("+") or query.replace(" ", "").isdigit():
             dorks += [
                 f'"{query}" site:pastebin.com',
@@ -2435,8 +2528,6 @@ class DarkelfUtils:
                 f'"{query}" intitle:index.of',
                 f'"{query}" ext:log OR ext:txt',
             ]
-
-        # Domain
         elif "." in query:
             dorks += [
                 f'site:{query} ext:log',
@@ -2446,8 +2537,6 @@ class DarkelfUtils:
                 f'"{query}" filetype:csv',
                 f'"{query}" site:archive.org',
             ]
-
-        # Username / Handle / Other
         else:
             dorks += [
                 f'"{query}" site:github.com',
@@ -2460,12 +2549,42 @@ class DarkelfUtils:
                 f'"{query}" site:pastebin.com',
                 f'"{query}" ext:log OR ext:txt',
             ]
-
         return dorks
+
+    def parse_ddg_lite_results(self, soup):
+        results = []
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            text = a.get_text(strip=True)
+            if href.startswith("http") and "google.com" not in href.lower():
+                results.append((text or "[no snippet]", href))
+        return results if results else "no_results"
+
+    def onion_ddg_search(self, query, max_results=10, use_tor=True):
+        session = requests.Session()
+        if use_tor:
+            session.proxies = self.TOR_PROXY
+        headers = {"User-Agent": "Mozilla/5.0"}
+
+        endpoints = [self.DUCKDUCKGO_LITE, self.DUCKDUCKGO_HTML]
+        random.shuffle(endpoints)
+        for endpoint in endpoints:
+            try:
+                if endpoint.endswith("/html"):
+                    res = session.post(endpoint, headers=headers, data={"q": query}, timeout=10)
+                else:
+                    res = session.get(f"{endpoint}?q={quote_plus(query)}", headers=headers, timeout=10)
+                soup = BeautifulSoup(res.text, "html.parser")
+                results = self.parse_ddg_lite_results(soup)
+                if results and results != "no_results":
+                    return results[:max_results]
+            except Exception:
+                continue
+        return []
 
     def run_dork_searches(self, dorks: list, max_results=10):
         """
-        Executes DuckDuckGo Lite dork-style queries via Tor.
+        Executes DuckDuckGo Lite dork-style queries via Tor in parallel.
         Assigns URLs to the first matching dork only (based on order).
         Prints only successful results and summarizes failed dorks.
         """
@@ -2490,15 +2609,21 @@ class DarkelfUtils:
 
         console.print("\n[bold underline cyan]🔗 DuckDuckGo Dorking Results:[/bold underline cyan]")
 
-        for dork in dorks:
+        def worker(dork):
             try:
                 hits = self.onion_ddg_search(dork, max_results=max_results)
                 urls = [url for _, url in hits if url not in seen_urls] if hits else []
+                return dork, urls
+            except Exception:
+                return dork, []
 
+        with ThreadPoolExecutor(max_workers=self.DORK_THREADS) as executor:
+            future_to_dork = {executor.submit(worker, dork): dork for dork in dorks}
+            for future in as_completed(future_to_dork):
+                dork, urls = future.result()
                 if urls:
                     for url in urls:
                         seen_urls.add(url)
-
                     color = next((v for k, v in category_colors.items() if k in dork), "white")
                     console.print(f"\n[bold {color}]🔍 Dork:[/bold {color}] [italic]{dork}[/italic]")
                     for i, url in enumerate(urls[:max_results], 1):
@@ -2506,12 +2631,35 @@ class DarkelfUtils:
                     results[dork] = urls[:max_results]
                 else:
                     failed_dorks.append(dork)
-            except Exception:
-                failed_dorks.append(dork)
 
         if failed_dorks:
             console.print(f"\n[yellow]⚠ No new results for {len(failed_dorks)} dork(s).[/yellow]")
 
+        return results
+
+    def fetch_url(self, url, use_tor=True, timeout=10):
+        session = requests.Session()
+        if use_tor:
+            session.proxies = self.TOR_PROXY
+        res = session.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
+        return res.text
+
+    def fetch_urls_parallel(self, urls, use_tor=True, timeout=10):
+        """
+        Fetches multiple URLs in parallel, returns a dict {url: content or None}
+        """
+        def worker(url):
+            try:
+                return url, self.fetch_url(url, use_tor=use_tor, timeout=timeout)
+            except Exception:
+                return url, None
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=self.FETCH_THREADS) as executor:
+            future_to_url = {executor.submit(worker, url): url for url in urls}
+            for future in as_completed(future_to_url):
+                url, content = future.result()
+                results[url] = content
         return results
 
     @staticmethod
@@ -2521,9 +2669,7 @@ class DarkelfUtils:
                 existing = json.load(infile)
         except (FileNotFoundError, json.JSONDecodeError):
             existing = []
-
         existing.append(data)
-
         with open(output_path, "w") as outfile:
             json.dump(existing, outfile, indent=4)
 
@@ -2816,26 +2962,6 @@ def run_phone_scan(phone, region="US", show_dorks=False):
 
     return "\n".join(summary_lines)
 
-# Example usage:
-# print(run_phone_scan("+1 (555) 123-4567", show_dorks=True))
-
-def run_sherlock_scan(username: str):
-    console.print(f"[cyan]🕵️ Running Sherlock on:[/cyan] [bold]{username}[/bold]")
-    try:
-        result = subprocess.run(
-            ["sherlock", username],
-            capture_output=True, text=True, timeout=120
-        )
-        if result.returncode == 0:
-            console.print(f"[green]✔ Sherlock result:[/green]\n{result.stdout}")
-            return result.stdout
-        else:
-            console.print(f"[red]✖ Sherlock failed:[/red] {result.stderr}")
-            return result.stderr
-    except Exception as e:
-        console.print(f"[red]⚠ Error running Sherlock:[/red] {e}")
-        return str(e)
-
 def extract_osint_data(html_content: str, username=None, email=None, phone=None) -> dict:
     data = {
         "emails": set(),
@@ -2862,126 +2988,242 @@ def extract_osint_data(html_content: str, username=None, email=None, phone=None)
             data["usernames"].add(username)
             data["mentions"].add(username)
     return data
-        
+
 def osintscan(query, use_tor=True, max_results=10):
     utils = DarkelfUtils()
     is_email = bool(re.match(r"^[^@]+@[^@]+\.[^@]+$", query))
     is_phone = bool(re.match(r"^\+?\d[\d\s\-().]{6,}$", query))
     is_username = bool(re.match(r"^@?[a-zA-Z0-9_.-]{3,32}$", query)) and not is_email and not is_phone
+    is_name = False
+
+    if not (is_email or is_phone or is_username):
+        parts = query.strip().split()
+        if len(parts) >= 2 and all(re.match(r"^[A-Za-z.\-']+$", p) for p in parts):
+            is_name = True
 
     username = query.lstrip('@') if is_username else None
     phone = re.sub(r"[^\d]", "", query) if is_phone else None
     email = query if is_email else None
-    domain = email.split("@")[1] if is_email and "@" in email else None
-    
+    name = query if is_name else None
+
     results = {
         "profiles": [],
         "mentions": [],
         "emails": [],
         "phones": [],
     }
-    
-    email_data = {}  # default
 
+    tlds = [
+        "com", "net", "org", "gov", "edu", "int", "info", "eu", "ch", "de", "fr", "it", "nl", "ru", "pl", "us", "uk", "au", "ca", "in", "biz", "pro", "co", "me"
+    ]
+    special_sites = [
+        "archive.org", "pastebin.com", "manchestercf.com", "egs.edu", "egs.edu.eu", "researchgate.net", "academia.edu", "ssrn.com", "osf.io", "darkelfbrowser.com"
+    ]
+
+    # ---- EMAIL SCAN (ALL DOMAINS) ----
     if is_email:
-        email_data = DarkelfUtils.run_email_scraper(email, use_tor=use_tor)
-        if email_data.get("valid"):
-            results["emails"].append(email)
+        try:
+            intel = EmailIntelPro(email, session=get_tor_session() if use_tor else requests.Session())
+            if intel.is_valid_email():
+                results["emails"].append(email)
+        except Exception:
+            pass
 
+        username_part = email.split("@")[0]
+        console.print(f"[bold cyan]🔍 Comprehensive scan for email and username part:[/bold cyan] [bold]{email}[/bold], [bold]{username_part}[/bold]")
+
+        dorks_email = [f'"{email}" site:{site}' for site in special_sites]
+        dorks_email += [f'"{email}" site:.{tld}' for tld in tlds]
+        dorks_email += [
+            f'"{email}"',
+            f'"{email}" ext:log OR ext:txt',
+            f'"{email}" filetype:pdf',
+            f'"{email}" inurl:profile',
+            f'"{email}" inurl:user',
+            f'"{email}" intitle:profile'
+        ]
+        dorks_username = [f'"{username_part}" site:{site}' for site in special_sites]
+        dorks_username += [f'"{username_part}" site:.{tld}' for tld in tlds]
+        dorks_username += [
+            f'"{username_part}"',
+            f'"{username_part}" ext:log OR ext:txt',
+            f'"{username_part}" filetype:pdf',
+            f'"{username_part}" inurl:profile',
+            f'"{username_part}" inurl:user',
+            f'"{username_part}" intitle:profile'
+        ]
+        # Get all URLs for email and username dorks
+        seen_urls = set()
+        all_urls = []
+        for dork in dorks_email + dorks_username:
+            ddg_results = utils.onion_ddg_search(dork, max_results=max_results, use_tor=use_tor)
+            for text, url in ddg_results:
+                if url in seen_urls or not url.startswith("http"):
+                    continue
+                seen_urls.add(url)
+                all_urls.append((text, url))
+        # Fetch all URLs in parallel and scan for mentions
+        def fetch_and_extract(url, text):
+            try:
+                html_content = utils.fetch_url(url, use_tor=use_tor, timeout=10)
+                found = []
+                if email.lower() in html_content.lower():
+                    found.append({"url": url, "snippet": f"...{email} found..."})
+                if re.search(rf"\b{re.escape(username_part)}\b", html_content, re.I):
+                    found.append({"url": url, "snippet": f"...{username_part} found..."})
+                # Profile detection
+                for f in found:
+                    if f"/{email}" in url or (text and email.lower() in text.lower()):
+                        results["profiles"].append(f)
+                    elif f"/{username_part}" in url or (text and username_part.lower() in text.lower()):
+                        results["profiles"].append(f)
+                    else:
+                        results["mentions"].append(f)
+            except Exception:
+                pass
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(fetch_and_extract, url, text) for text, url in all_urls]
+            for _ in as_completed(futures):
+                pass
+
+    # ---- PHONE SCAN ----
     if is_phone:
-        # Run phone scan and capture output
         phone_output = run_phone_scan(query)
-
-        # Extract and append found phone number formats
         raw, local, e164, international = format_phone_local(query)
         results["phones"].extend({raw, local, e164, international})
-
-        # Extract all URLs (no Google filtering needed anymore)
         urls = re.findall(r"https?://[^\s]+", phone_output)
         if urls:
             results["mentions"].extend(urls)
-
-        # Clean the phone_output for mention logging
         lines = phone_output.splitlines()
         filtered_lines = [line for line in lines if line.strip()]
         cleaned = "\n".join(filtered_lines).strip()
-
         if cleaned:
             results["mentions"].append("PhoneScan:\n" + cleaned)
 
+    # ---- USERNAME SCAN (ALL DOMAINS, PARALLEL) ----
     if is_username:
-        sherlock_output = run_sherlock_scan(username)
-        sherlock_urls = re.findall(r"(https?://[^\s]+)", sherlock_output)
-        for url in sherlock_urls:
-            results["profiles"].append(url)
-        # Deep search for username mentions
-        ddg_results = utils.onion_ddg_search(f'"{username}"')
-        for text, url in ddg_results[:max_results]:
+        console.print(f"[bold cyan]🔍 Comprehensive scan for username:[/bold cyan] [bold]{username}[/bold]")
+        dorks_username = [f'"{username}" site:{site}' for site in special_sites]
+        dorks_username += [f'"{username}" site:.{tld}' for tld in tlds]
+        dorks_username += [
+            f'"{username}"',
+            f'"{username}" ext:log OR ext:txt',
+            f'"{username}" filetype:pdf',
+            f'"{username}" inurl:profile',
+            f'"{username}" inurl:user',
+            f'"{username}" intitle:profile'
+        ]
+        # Collect all URLs from all dorks first
+        seen_urls = set()
+        all_urls = []
+        for dork in dorks_username:
+            ddg_results = utils.onion_ddg_search(dork, max_results=max_results, use_tor=use_tor)
+            for text, url in ddg_results:
+                if url in seen_urls or not url.startswith("http"):
+                    continue
+                seen_urls.add(url)
+                all_urls.append((text, url))
+        # Fetch all URLs in parallel and scan for mentions
+        def fetch_and_extract(url, text):
             try:
-                html_content = fetch_url(url, use_tor=use_tor, timeout=10)
-                osint_data = extract_osint_data(html_content, username=username)
-                if osint_data["usernames"]:
-                    results["mentions"].append(url)
+                html_content = utils.fetch_url(url, use_tor=use_tor, timeout=10)
+                if re.search(rf"\b{re.escape(username)}\b", html_content, re.I):
+                    entry = {"url": url, "snippet": f"...{username} found..."}
+                    if f"/{username}" in url or (text and username.lower() in text.lower()):
+                        results["profiles"].append(entry)
+                    else:
+                        results["mentions"].append(entry)
             except Exception:
-                continue
+                pass
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(fetch_and_extract, url, text) for text, url in all_urls]
+            for _ in as_completed(futures):
+                pass
 
-    if is_email:
-        # Email scraper
-        found_emails = DarkelfUtils.run_email_scraper(email, use_tor=use_tor)
-        for e in found_emails:
-            if e.lower() == email.lower():
-                results["emails"].append(e)
-        # Deep search for email mentions
-        ddg_results = utils.onion_ddg_search(f'"{email}"', use_tor=use_tor)
-        for text, url in ddg_results[:max_results]:
+    # ---- PERSONAL NAME SCAN (ALL DOMAINS, PARALLEL) ----
+    if is_name:
+        console.print(f"[bold cyan]🔍 Comprehensive scan for personal name:[/bold cyan] [bold]{name}[/bold]")
+        dorks_name = [f'"{name}" site:{site}' for site in special_sites]
+        dorks_name += [f'"{name}" site:.{tld}' for tld in tlds]
+        dorks_name += [
+            f'"{name}"',
+            f'"{name}" ext:log OR ext:txt',
+            f'"{name}" filetype:pdf',
+            f'"{name}" inurl:profile',
+            f'"{name}" inurl:user',
+            f'"{name}" intitle:profile'
+        ]
+        parts = name.strip().split()
+        if len(parts) == 3:
+            f, m, l = parts
+            dorks_name.append(f'"{f} {l}"')
+            dorks_name.append(f'"{f[0]}. {l}"')
+        elif len(parts) == 2:
+            f, l = parts
+            dorks_name.append(f'"{f[0]}. {l}"')
+        seen_urls = set()
+        all_urls = []
+        for dork in dorks_name:
+            ddg_results = utils.onion_ddg_search(dork, max_results=max_results, use_tor=use_tor)
+            for text, url in ddg_results:
+                if url in seen_urls or not url.startswith("http"):
+                    continue
+                seen_urls.add(url)
+                all_urls.append((text, url))
+        def fetch_and_extract(url, text):
             try:
-                html_content = fetch_url(url, use_tor=use_tor, timeout=10)
-                osint_data = extract_osint_data(html_content, email=email)
-                if osint_data["emails"]:
-                    results["mentions"].append(url)
+                html_content = utils.fetch_url(url, use_tor=use_tor, timeout=10)
+                if re.search(re.escape(name), html_content, re.I):
+                    entry = {"url": url, "snippet": f"...{name} found..."}
+                    if f"/{name.replace(' ', '')}" in url or (text and name.lower() in text.lower()):
+                        results["profiles"].append(entry)
+                    else:
+                        results["mentions"].append(entry)
             except Exception:
-                continue
-        pastebin_results = utils.onion_ddg_search(f'"{email}" site:pastebin.com', use_tor=use_tor)
-        for text, url in pastebin_results[:max_results]:
-            try:
-                html_content = fetch_url(url, use_tor=use_tor, timeout=10)
-                osint_data = extract_osint_data(html_content, email=email)
-                if osint_data["emails"]:
-                    results["mentions"].append(url)
-            except Exception:
-                continue
+                pass
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(fetch_and_extract, url, text) for text, url in all_urls]
+            for _ in as_completed(futures):
+                pass
 
-    # OUTPUT
+    # ---- OUTPUT ----
+    def dedup_by_url(items):
+        seen = set()
+        out = []
+        for x in items:
+            url = x["url"] if isinstance(x, dict) else x
+            if url not in seen:
+                out.append(x)
+                seen.add(url)
+        return out
+    results["profiles"] = dedup_by_url(results["profiles"])
+    results["mentions"] = dedup_by_url(results["mentions"])
+
     if results["profiles"]:
         console.print("\n[green]🔗 Correlated Profiles:[/green]")
-        for url in sorted(set(results["profiles"])):
-            console.print(f"   [cyan]{url}[/cyan]")
-    elif is_username:
-        console.print("[yellow]No correlated profiles found.[/yellow]")
-
+        for p in results["profiles"]:
+            console.print(f"   [cyan]{p['url']}[/cyan] [dim]{p.get('snippet','')}[/dim]")
+    if results["mentions"]:
+        console.print("\n[yellow]🔎 Mentions/Leaks:[/yellow]")
+        for m in results["mentions"]:
+            if isinstance(m, dict):
+                console.print(f"   [cyan]{m['url']}[/cyan] [dim]{m.get('snippet','')}[/dim]")
+            else:
+                console.print(f"   [cyan]{m}[/cyan]")
     if results["emails"]:
         console.print("\n[green]✉️ Exact Emails Found:[/green]")
         for e in results["emails"]:
             console.print(f"   [cyan]{e}[/cyan]")
-
     if results["phones"]:
         console.print("\n[green]📞 Exact Phone Numbers Found:[/green]")
         for p in sorted(set(results["phones"])):
             console.print(f"   [cyan]{p}[/cyan]")
 
-    if results["mentions"]:
-        console.print("\n[yellow]🔎 Mentions/Leaks:[/yellow]")
-        for url in sorted(set(results["mentions"])):
-            console.print(f"   [cyan]{url}[/cyan]")
-    else:
-        console.print("[yellow]No mentions or leaks found.[/yellow]")
-
     # Always show useful search links (using DDG Onion Lite and other options)
     console.print("\n[blue]🔍 Useful search links:[/blue]")
 
     ddg_onion_lite = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
-
-    for name, url in [
+    for name_label, url in [
         ("Startpage", f"https://www.startpage.com/do/dsearch?query={quote_plus(query)}"),
         ("DuckDuckGo", f"{ddg_onion_lite}?q={quote_plus(query)}"),
         ("Twitter", f"https://twitter.com/search?q={quote_plus(query)}"),
@@ -2989,8 +3231,8 @@ def osintscan(query, use_tor=True, max_results=10):
         ("LinkedIn", f"https://www.linkedin.com/search/results/all/?keywords={quote_plus(query)}"),
         ("Facebook", f"https://www.facebook.com/search/top/?q={quote_plus(query)}"),
     ]:
-        console.print(f"   [bold]{name}:[/bold] [cyan]{url}[/cyan]")
-        
+        console.print(f"   [bold]{name_label}:[/bold] [cyan]{url}[/cyan]")
+
     # 🔍 Generate DuckDuckGo dorks based on query
     dorks = utils.generate_duckduckgo_dorks(query)
 
@@ -3001,10 +3243,10 @@ def osintscan(query, use_tor=True, max_results=10):
         dork_url = f"{ddg_lite_base}?q={quote_plus(dork)}"
         console.print(f"   [italic]{dork}[/italic] → [cyan]{dork_url}[/cyan]")
 
-    # 🔎 Execute each dork using DuckDuckGo Onion Lite search
+    # 🔎 Execute each dork using DuckDuckGo Onion Lite search (summary)
     console.print("\n[bold magenta]🔗 DuckDuckGo Dorking Results:[/bold magenta]")
-    dork_results = utils.run_dork_searches(dorks)
-
+    utils.run_dork_searches(dorks)
+    
 # Logging Setup
 logging.basicConfig(
     filename="darkelf_tls_monitor.log",
