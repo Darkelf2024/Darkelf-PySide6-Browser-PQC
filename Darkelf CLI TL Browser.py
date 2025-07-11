@@ -107,6 +107,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from requests import Response
 from phonenumbers import carrier, geocoder, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from rich.markdown import Markdown
 import requests
 
 # --- Tor integration via Stem ---
@@ -300,8 +301,15 @@ class IPLookup:
 
     def get_public_ip(self):
         try:
-            r = requests.get("https://api.ipify.org", timeout=self.timeout, proxies=self.proxies)
-            return r.text.strip()
+            r = requests.get("http://api.ipify.org", timeout=self.timeout, proxies=self.proxies)
+            ip = r.text.strip()
+            # Validate IP before returning
+            try:
+                ipaddress.ip_address(ip)
+                return ip
+            except ValueError:
+                self.console.print(f"[red]Invalid IP response from api.ipify.org: {ip}[/red]")
+                return None
         except Exception as e:
             self.console.print(f"[red]Failed to fetch public IP: {e}[/red]")
             return None
@@ -1930,6 +1938,86 @@ def get_tor_proxy():
 # Ensure entropy at program start
 ensure_strong_entropy()
 
+class KyberVault:
+    """
+    Quantum-safe vault for storing, encrypting, and decrypting files using Kyber KEM.
+    Uses kyber_pub.bin and kyber_priv.bin only, like DarkelfMessenger.
+    Stores vault files as vault_xxx.dat in vault_dir.
+    """
+
+    def __init__(self, vault_dir="darkelf_vault", kem_algo="Kyber768"):
+        self.vault_dir = os.path.abspath(vault_dir)
+        os.makedirs(self.vault_dir, exist_ok=True)
+        self.kem_algo = kem_algo
+        self.pubkey_path = os.path.join(self.vault_dir, "kyber_pub.bin")
+        self.privkey_path = os.path.join(self.vault_dir, "kyber_priv.bin")
+
+    def generate_keys(self):
+        kem = oqs.KeyEncapsulation(self.kem_algo)
+        public_key = kem.generate_keypair()
+        private_key = kem.export_secret_key()
+        with open(self.pubkey_path, "wb") as f:
+            f.write(public_key)
+        with open(self.privkey_path, "wb") as f:
+            f.write(private_key)
+        return self.pubkey_path, self.privkey_path
+
+    def encrypt_file(self, plaintext, filename=None):
+        """
+        Encrypt the plaintext string, store as a .dat file in the vault directory.
+        """
+        if not os.path.isfile(self.pubkey_path):
+            raise FileNotFoundError(f"Kyber public key not found: {self.pubkey_path}")
+        with open(self.pubkey_path, "rb") as f:
+            pubkey = f.read()
+        kem = oqs.KeyEncapsulation(self.kem_algo)
+        ct, shared_secret = kem.encap_secret(pubkey)
+        fkey = base64.urlsafe_b64encode(shared_secret[:32])
+        token = Fernet(fkey).encrypt(plaintext.encode())
+        ct_b64 = base64.b64encode(ct)
+        token_b64 = base64.b64encode(token)
+        if not filename:
+            fname = f"vault_{int(time.time())}.dat"
+        else:
+            fname = filename
+        path = os.path.join(self.vault_dir, fname)
+        with open(path, "wb") as f:
+            f.write(b"v1||" + ct_b64 + b"||" + token_b64)
+        return path
+
+    def decrypt_file(self, filename):
+        """
+        Decrypt a vault .dat file using kyber_priv.bin.
+        """
+        path = os.path.join(self.vault_dir, filename)
+        if not os.path.isfile(self.privkey_path):
+            raise FileNotFoundError(f"Kyber private key not found: {self.privkey_path}")
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Vault file not found: {path}")
+        with open(path, "rb") as f:
+            content = f.read()
+        if not content.startswith(b"v1||"):
+            raise ValueError("Vault file is corrupted or has wrong format.")
+        try:
+            _, ct_b64, token_b64 = content.split(b"||", 2)
+            ct = base64.b64decode(ct_b64)
+            token = base64.b64decode(token_b64)
+            with open(self.privkey_path, "rb") as f:
+                privkey = f.read()
+            kem = oqs.KeyEncapsulation(self.kem_algo, secret_key=privkey)
+            shared_secret = kem.decap_secret(ct)
+            fkey = base64.urlsafe_b64encode(shared_secret[:32])
+            decrypted = Fernet(fkey).decrypt(token).decode()
+            return decrypted
+        except Exception as e:
+            raise ValueError("Failed to decrypt vault file: " + str(e))
+
+    def list_vault(self):
+        """
+        List all .dat files in the vault directory.
+        """
+        return [f for f in os.listdir(self.vault_dir) if f.endswith(".dat")]
+        
 console = Console()
 
 def get_key():
@@ -1937,10 +2025,15 @@ def get_key():
     old_settings = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
-        key = sys.stdin.read(1)
-        if key == '\x1b':
-            key += sys.stdin.read(2)
-        return key
+        chars = []
+        while True:
+            ch = sys.stdin.read(1)
+            chars.append(ch)
+            # Check for escape sequence (arrow keys)
+            if chars[0] != '\x1b':
+                return chars[0]
+            if len(chars) == 3:
+                return ''.join(chars)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
@@ -1965,8 +2058,11 @@ def fetch_browser_page(url, debug=False):
             time.sleep(1)
 
 def make_clickable(text, url):
-    """Return a rich.Text with an OSC8 hyperlink if terminal supports."""
     return Text(text, style=f"underline blue link {url}")
+
+def fetch_with_requests(url, debug=False):
+    html, real_url = fetch_browser_page(url, debug=debug)
+    return html, {}
 
 class Page:
     def __init__(self, url):
@@ -1987,49 +2083,39 @@ class Page:
             title_tag = soup.find('title')
             if title_tag:
                 self.title = title_tag.get_text(strip=True)
-            # Gather headings for TOC
-            self.headings = []
-            for h in soup.find_all(['h1', 'h2', 'h3']):
-                self.headings.append(h.get_text(strip=True))
-            # Gather content lines
+            self.headings = [h.get_text(strip=True) for h in soup.find_all(['h1', 'h2', 'h3'])]
             results = soup.select(".result")
-            fancy_divider = "═" * 40  # Fancy divider line
+            fancy_divider = "═" * 40
             if results:
                 self.lines = []
                 for idx, result in enumerate(results):
                     title = result.select_one(".result__title")
                     snippet = result.select_one(".result__snippet")
                     link = result.find("a", href=True)
-                    # Add paragraph with colored number for each result
                     if title:
                         self.lines.append((f"[{idx+1}]", title.get_text(strip=True)))
                     if snippet:
                         self.lines.append(("", snippet.get_text(strip=True)))
                     if link:
                         self.lines.append(("", link['href']))
-                    # Fancy divider after each result
                     self.lines.append((None, fancy_divider))
             else:
-                # Fallback: full HTML text as spaced sections
                 self.lines = []
                 for idx, p in enumerate(soup.find_all("p")):
                     text = p.get_text(strip=True)
                     if text:
                         self.lines.append((f"[{idx+1}]", text))
                         self.lines.append((None, fancy_divider))
-                # If no <p>, fallback to generic splitting
                 if not self.lines:
                     main_content = soup.get_text(separator='\n\n')
                     paragraphs = [p.strip() for p in main_content.split('\n\n') if p.strip()]
                     for idx, paragraph in enumerate(paragraphs):
                         self.lines.append((f"[{idx+1}]", paragraph))
                         self.lines.append((None, fancy_divider))
-                # Remove trailing divider if present
                 if self.lines and self.lines[-1][1] == fancy_divider:
                     self.lines.pop()
             if not self.lines:
                 self.lines = [(None, "[dim]No content available.[/dim]")]
-            # Find all links, keep their order and number
             self.links = [(i + 1, a.get_text(strip=True), a.get('href')) for i, a in enumerate(soup.find_all('a'))]
             for i, (num, label, _) in enumerate(self.links):
                 if label:
@@ -2051,11 +2137,16 @@ class DarkelfCLIBrowser:
         self.active_tab = 0
         self.height = max(12, shutil.get_terminal_size((80, 24)).lines - 2)
         self.needs_render = True
-        self.page_size = 15  # lines per 'page' in paginated mode
+        self.page_size = 15
         self.help_mode = False
         self.links_mode = False
         self.quit = False
+        self.search_term = ""
+        self.search_matches = []
+        self.current_match_idx = 0
+        self.vault = KyberVault()
         signal.signal(signal.SIGWINCH, self.on_resize)
+        self.console = Console()
 
     def get_terminal_size(self):
         return shutil.get_terminal_size((80, 24))
@@ -2069,8 +2160,11 @@ class DarkelfCLIBrowser:
     def wrap_text(self, lines, width):
         fancy_divider = "═" * (width - 4)
         wrapped = []
-        for pair in lines:
+        for idx, pair in enumerate(lines):
             number, line = pair if isinstance(pair, tuple) else (None, pair)
+            # Search highlight
+            if self.search_term and self.search_term.lower() in line.lower():
+                line = line.replace(self.search_term, f"[reverse red]{self.search_term}[/reverse red]")
             if line.strip() == "═" * 40 or line.strip() == fancy_divider:
                 wrapped.append(Text(" ", style="white"))
                 wrapped.append(Text(fancy_divider, style="bold magenta"))
@@ -2104,6 +2198,88 @@ class DarkelfCLIBrowser:
                     pass
             wrapped.extend(textwrap.wrap(line, width=width) or [""])
         return wrapped
+
+    def do_search(self):
+        self.search_term = input("Search: ").strip()
+        self.search_matches = []
+        self.current_match_idx = 0
+        if not self.search_term or not self.current_page or not self.current_page.lines:
+            return
+        term = self.search_term.lower()
+        for idx, (_, line) in enumerate(self.current_page.lines):
+            if term in line.lower():
+                self.search_matches.append(idx)
+        if self.search_matches:
+            self.scroll = self.search_matches[0] // self.page_size
+            self.current_match_idx = 0
+
+    def next_match(self):
+        if self.search_matches:
+            self.current_match_idx = (self.current_match_idx + 1) % len(self.search_matches)
+            idx = self.search_matches[self.current_match_idx]
+            self.scroll = idx // self.page_size
+            self.needs_render = True
+
+    def prev_match(self):
+        if self.search_matches:
+            self.current_match_idx = (self.current_match_idx - 1) % len(self.search_matches)
+            idx = self.search_matches[self.current_match_idx]
+            self.scroll = idx // self.page_size
+            self.needs_render = True
+
+    def jump_to_heading(self):
+        if not self.current_page or not self.current_page.headings:
+            console.print("[yellow]No headings found on this page.[/yellow]")
+            return
+        for i, heading in enumerate(self.current_page.headings):
+            console.print(f"{i+1}. {heading}")
+        num = input("Jump to heading #: ").strip()
+        if num.isdigit():
+            idx = int(num) - 1
+            if 0 <= idx < len(self.current_page.headings):
+                heading_text = self.current_page.headings[idx]
+                for i, (_, line) in enumerate(self.current_page.lines):
+                    if heading_text in line:
+                        self.scroll = i // self.page_size
+                        self.needs_render = True
+                        break
+
+    def render_markdown(self, width):
+        content = "\n".join(line for _, line in self.current_page.lines)
+        md = Markdown(content)
+        console.print(Panel(md, title="Markdown", border_style="white", width=width, expand=True))
+
+    def export_to_vault(self):
+        if not self.current_page:
+            self.console.print("[red]No page loaded.[/red]")
+            return
+        # Ensure Kyber keys exist
+        if not (os.path.exists(self.vault.pubkey_path) and os.path.exists(self.vault.privkey_path)):
+            self.vault.generate_keys()
+            self.console.print("[green]Vault keypair generated.[/green]")
+        content = "\n".join(line for _, line in self.current_page.lines)
+        fname = f"vault_{int(time.time())}.dat"
+        try:
+            self.vault.encrypt_file(content, filename=fname)
+            self.console.print(f"[green]Page exported to vault as {fname}[/green]")
+        except Exception as e:
+            self.console.print(f"[red]Vault export failed: {e}[/red]")
+
+    def list_vault(self):
+        files = self.vault.list_vault()
+        if not files:
+            self.console.print("[yellow]No vault files found.[/yellow]")
+            return
+        self.console.print("[bold magenta]Vault Files:[/bold magenta]")
+        for f in files:
+            self.console.print(f"  {f}")
+        fname = input("File to decrypt: ").strip()
+        if fname in files:
+            try:
+                decrypted = self.vault.decrypt_file(fname)
+                self.console.print(Panel(decrypted, title=f"Vault File: {fname}", border_style="green"))
+            except Exception as e:
+                self.console.print(f"[red]Failed to decrypt: {e}[/red]")
 
     def render(self):
         self.clear()
@@ -2176,23 +2352,22 @@ class DarkelfCLIBrowser:
         footer.append("[F] Search  ", style="bold green")
         footer.append("[L] List Links  ", style="bold magenta")
         footer.append("[E] Export Links  ", style="bold yellow")
+        footer.append("[V] Vault Export  ", style="bold green")
+        footer.append("[v] View Vault  ", style="bold blue")
+        footer.append("[G] Headings  ", style="bold magenta")
+        footer.append("[M] Markdown  ", style="bold yellow")
+        footer.append("[/] Search  ", style="bold bright_cyan")
+        footer.append("[N] Next match  ", style="bold bright_cyan")
         footer.append("[?] Help  ", style="bold cyan")
         footer.append("[Q] Quit", style="bold red")
         console.print(Align.center(footer, width=width))
 
     def render_help(self, width):
-        if self.current_page:
-            header_text = Text.assemble(
-                ("Darkelf CLI Browser", "bold cyan"),
-                f" | Tab {self.active_tab + 1}/{len(self.tabs)}\n",
-                (self.current_page.title or self.current_page.url, "blue underline")
-            )
-        else:
-            header_text = Text.assemble(
-                ("Darkelf CLI Browser", "bold cyan"),
-                " | No Tab\n",
-                ("No Page Loaded", "blue underline")
-            )
+        header_text = Text.assemble(
+            ("Darkelf CLI Browser", "bold cyan"),
+            f" | Tab {self.active_tab + 1}/{len(self.tabs)}\n",
+            (self.current_page.title or self.current_page.url if self.current_page else "No Page Loaded", "blue underline")
+        )
         console.print(Panel(header_text, border_style="cyan", padding=(1, 2), width=width))
         helptext = Text()
         helptext.append(Text.from_markup("\n[bold cyan]Darkelf CLI Browser Help[/bold cyan]\n\n"))
@@ -2205,16 +2380,22 @@ class DarkelfCLIBrowser:
         helptext.append("[F]           : DuckDuckGo search\n")
         helptext.append("[L]           : List all links on page\n")
         helptext.append("[E]           : Export links to file\n")
+        helptext.append("[V]           : Export page to Kyber Vault\n")
+        helptext.append("[v]           : View/decrypt Vault files\n")
+        helptext.append("[G]           : Jump to heading\n")
+        helptext.append("[M]           : Render page as Markdown\n")
+        helptext.append("[/]           : Search within page\n")
+        helptext.append("[N]           : Next search match\n")
         helptext.append("[?]           : Show this help\n")
         helptext.append("[Q]           : Quit and clear screen\n")
-        helptext.append(Text.from_markup("\n[bold magenta]Tips:[/bold magenta] Use [O] to open numbered links, [L] to see all links, and enjoy spaced, readable content!\n"))
+        helptext.append(Text.from_markup("\n[bold magenta]Tips:[/bold magenta] Use [O] to open numbered links, [L] to see all links, highlight search terms with /, export securely with V!\n"))
         console.print(Panel(helptext, title="Help", border_style="cyan", width=width))
         self.render_footer(width)
         console.print("\nPress any key to return.")
         get_key()
         self.help_mode = False
         self.needs_render = True
-
+        
     def export_links(self):
         if not self.current_page or not self.current_page.links:
             console.print("[red]No links to export.[/red]")
@@ -2438,34 +2619,47 @@ class DarkelfCLIBrowser:
                     continue
                 break
 
-            key = get_key().lower()
-            if key in ('q', 'Q'):
-                self.quit = True
-                break
-            elif key in ('\x1b[A', 'w', 'k'):
+            key = get_key()
+            if key == '\x1b[A' or key == 'w' or key == 'k':
                 if self.current_page and self.scroll > 0:
                     self.scroll -= 1
                     self.needs_render = True
-            elif key in ('\x1b[B', 's', 'j'):
+            elif key == '\x1b[B' or key == 's' or key == 'j':
                 if self.current_page and self.current_page.lines:
                     total_pages = max(1, (len(self.current_page.lines) + self.page_size - 1) // self.page_size)
                     if self.scroll + 1 < total_pages:
                         self.scroll += 1
                         self.needs_render = True
-            elif key in ('u',):
+            elif key == '/':
+                self.do_search()
+            elif key == 'n':
+                self.next_match()
+            elif key == 'N':
+                self.prev_match()
+            elif key == 'G':
+                self.jump_to_heading()
+            elif key == 'M':
+                if self.current_page:
+                    width = self.get_terminal_size().columns
+                    self.render_markdown(width)
+            elif key == 'v':
+                self.list_vault()
+            elif key == 'V':
+                self.export_to_vault()
+            elif key == 'u':
                 url = input("\nEnter URL: ").strip()
                 if not url:
                     continue
                 if not url.startswith(("http://", "https://")):
                     url = "https://" + url
                 self.visit(url)
-            elif key in ('b',):
+            elif key == 'b':
                 if self.history:
                     url = self.history.pop()
                     if self.current_page:
                         self.forward_stack.append(self.current_page.url)
                     self.visit(url)
-            elif key in ('o',):
+            elif key == 'o':
                 try:
                     num = int(input("Open link #: "))
                     self.open_link(num)
@@ -2474,19 +2668,22 @@ class DarkelfCLIBrowser:
             elif key.isdigit():
                 num = int(key)
                 self.open_link(num)
-            elif key in ('h',):
+            elif key == 'h':
                 self.show_history()
                 self.needs_render = True
-            elif key in ('t',):
+            elif key == 't':
                 self.manage_tabs()
-            elif key in ('f',):
+            elif key == 'f':
                 self.simulate_search_prompt()
-            elif key in ('?',):
+            elif key == '?':
                 self.help_mode = True
                 self.needs_render = True
-            elif key in ('l',):
+            elif key == 'l':
                 self.links_mode = True
                 self.needs_render = True
+            elif key == 'q' or key == 'Q':
+                self.quit = True
+                break
         self.secure_wipe()
         self.clear()
         sys.exit(0)
