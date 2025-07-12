@@ -2060,10 +2060,6 @@ def fetch_browser_page(url, debug=False):
 def make_clickable(text, url):
     return Text(text, style=f"underline blue link {url}")
 
-def fetch_with_requests(url, debug=False):
-    html, real_url = fetch_browser_page(url, debug=debug)
-    return html, {}
-
 class Page:
     def __init__(self, url):
         self.url = url
