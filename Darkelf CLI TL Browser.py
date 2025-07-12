@@ -143,7 +143,6 @@ class EmailIntelPro:
         self.creation_date = "Unknown"
         self.breached = "Unknown"
         self.breach_url = None
-        self.gravatar = False
         self.score = 0
 
     def is_valid_email(self):
@@ -183,21 +182,12 @@ class EmailIntelPro:
         except:
             self.creation_date = "Unknown"
 
-    def check_gravatar(self):
-        h = hashlib.md5(self.email.strip().lower().encode()).hexdigest()
-        url = f"https://www.gravatar.com/avatar/{h}?d=404"
-        try:
-            self.gravatar = self.session.get(url, timeout=5).status_code == 200
-        except:
-            self.gravatar = False
-
     def calculate_score(self):
         self.score = 0
         self.score += 3 if self.disposable else 0
         self.score += 2 if not self.mx_records else 0
         self.score += 3 if self.breached == "Yes" else 0
         self.score += 1 if self.creation_date == "Unknown" else 0
-        self.score += 1 if not self.gravatar else 0
 
     def threat_label(self):
         if self.score >= 7:
@@ -216,7 +206,6 @@ class EmailIntelPro:
         self.fetch_txt_records()
         self.check_disposable()
         self.check_rdap()
-        self.check_gravatar()
         self.calculate_score()
 
         table = Table(title=f"📧 Enhanced Email Intel for [bold]{self.email}[/bold]", show_lines=True)
@@ -229,7 +218,6 @@ class EmailIntelPro:
             table.add_row("MX Servers", "\n".join(self.mx_records))
         table.add_row("Disposable Provider", "⚠️ Yes" if self.disposable else "✅ No")
         table.add_row("Domain Creation", self.creation_date)
-        table.add_row("Gravatar Profile", "👤 Yes" if self.gravatar else "🙈 None")
         table.add_row("Leaked in Breach", self.breached)
         if self.breach_url:
             table.add_row("Leak Details", self.breach_url)
@@ -2018,24 +2006,85 @@ class KyberVault:
         """
         return [f for f in os.listdir(self.vault_dir) if f.endswith(".dat")]
         
+    def wipe_vault_files(self):
+        """
+        Securely wipe all .dat files in the vault directory.
+        """
+        for fname in self.list_vault():
+            fpath = os.path.join(self.vault_dir, fname)
+            try:
+                size = os.path.getsize(fpath)
+                with open(fpath, "r+b") as f:
+                    for _ in range(3):
+                        f.seek(0)
+                        f.write(secrets.token_bytes(size))
+                        f.flush()
+                        os.fsync(f.fileno())
+                os.remove(fpath)
+            except Exception:
+                pass
+                
 console = Console()
+
+# --- Theme definitions, improved for accuracy ---
+DARKELF_THEMES = {
+    "dark": {
+        "panel_border": "bright_magenta",
+        "header_text": "bold bright_magenta",
+        "footer_text": "bright_magenta",
+        "content": "white",
+        "highlight": "cyan",
+        "link": "bright_cyan underline",
+        "table_header": "bold cyan",
+        "table_row": "white",
+        "divider": "cyan",
+    },
+    "hacker": {
+        "panel_border": "bright_green",
+        "header_text": "bold bright_green",
+        "footer_text": "bright_green",
+        "content": "white",
+        "highlight": "bright_green",
+        "link": "bold green underline",
+        "table_header": "bold green",
+        "table_row": "white",
+        "divider": "bright_green",
+    },
+    "light": {
+        "panel_border": "bright_white",
+        "header_text": "bold bright_blue",
+        "footer_text": "bright_blue",
+        "content": "black",
+        "highlight": "yellow",
+        "link": "bright_blue underline",
+        "table_header": "bold bright_blue",
+        "table_row": "black",
+        "divider": "yellow",
+    },
+    "blue": {
+        "panel_border": "bright_blue",
+        "header_text": "bold bright_blue",
+        "footer_text": "bright_blue",
+        "content": "white",
+        "highlight": "cyan",
+        "link": "bright_blue underline",
+        "table_header": "bold bright_blue",
+        "table_row": "white",
+        "divider": "cyan",
+    }
+}
 
 def get_key():
     fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
+    old = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
-        chars = []
-        while True:
-            ch = sys.stdin.read(1)
-            chars.append(ch)
-            # Check for escape sequence (arrow keys)
-            if chars[0] != '\x1b':
-                return chars[0]
-            if len(chars) == 3:
-                return ''.join(chars)
+        ch = sys.stdin.read(1)
+        if ch == '\x1b':
+            ch += sys.stdin.read(2)
+        return ch
     finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 def fetch_browser_page(url, debug=False):
     headers = {
@@ -2143,6 +2192,17 @@ class DarkelfCLIBrowser:
         self.vault = KyberVault()
         signal.signal(signal.SIGWINCH, self.on_resize)
         self.console = Console()
+        self.theme_name = "blue"  # Default: cyan/blue/green
+        self.theme = DARKELF_THEMES[self.theme_name]
+
+    def set_theme(self, name):
+        if name in DARKELF_THEMES:
+            self.theme_name = name
+            self.theme = DARKELF_THEMES[name]
+            self.console.print(f"[green]Theme set to {name}.[/green]")
+            self.needs_render = True
+        else:
+            self.console.print(f"[red]Theme '{name}' not found. Available: {', '.join(DARKELF_THEMES.keys())}[/red]")
 
     def get_terminal_size(self):
         return shutil.get_terminal_size((80, 24))
@@ -2160,39 +2220,39 @@ class DarkelfCLIBrowser:
             number, line = pair if isinstance(pair, tuple) else (None, pair)
             # Search highlight
             if self.search_term and self.search_term.lower() in line.lower():
-                line = line.replace(self.search_term, f"[reverse red]{self.search_term}[/reverse red]")
+                line = line.replace(self.search_term, f"[reverse {self.theme['highlight']}]{self.search_term}[/reverse {self.theme['highlight']}]")
             if line.strip() == "═" * 40 or line.strip() == fancy_divider:
-                wrapped.append(Text(" ", style="white"))
-                wrapped.append(Text(fancy_divider, style="bold magenta"))
-                wrapped.append(Text(" ", style="white"))
+                wrapped.append(Text(" ", style=self.theme["content"]))
+                wrapped.append(Text(fancy_divider, style=f"bold {self.theme['divider']}"))
+                wrapped.append(Text(" ", style=self.theme["content"]))
                 continue
             if not line.strip():
-                wrapped.append("")
+                wrapped.append(Text("", style=self.theme["content"]))
                 continue
             if line.isupper() and len(line) < 80:
-                wrapped.append(Text(line, style="bold yellow"))
-                wrapped.append("")
+                wrapped.append(Text(line, style=f"bold {self.theme['highlight']}"))
+                wrapped.append(Text("", style=self.theme["content"]))
                 continue
             if line.endswith(":") and len(line) < 80:
-                wrapped.append(Text(line, style="bold bright_cyan"))
-                wrapped.append("")
+                wrapped.append(Text(line, style=f"bold {self.theme['header_text']}"))
+                wrapped.append(Text("", style=self.theme["content"]))
                 continue
             if number and number.startswith("[") and "]" in number:
                 text_obj = Text()
-                text_obj.append(number + " ", style="bold cyan")
-                text_obj.append(line, style="blue")
+                text_obj.append(number + " ", style=self.theme["highlight"])
+                text_obj.append(line, style=self.theme["link"])
                 wrapped.append(text_obj)
-                wrapped.append("")
+                wrapped.append(Text("", style=self.theme["content"]))
                 continue
             if line.strip().startswith("[") and "]" in line:
                 try:
                     num = int(line.strip().split("]")[0][1:])
-                    wrapped.append(Text(line, style="underline blue"))
-                    wrapped.append("")
+                    wrapped.append(Text(line, style=f"underline {self.theme['link']}"))
+                    wrapped.append(Text("", style=self.theme["content"]))
                     continue
                 except Exception:
                     pass
-            wrapped.extend(textwrap.wrap(line, width=width) or [""])
+            wrapped.extend([Text(t, style=self.theme["content"]) for t in textwrap.wrap(line, width=width) or [""]])
         return wrapped
 
     def do_search(self):
@@ -2241,9 +2301,17 @@ class DarkelfCLIBrowser:
                         break
 
     def render_markdown(self, width):
-        content = "\n".join(line for _, line in self.current_page.lines)
+        # Restore clean organized line breaks!
+        output_lines = []
+        for i, (_, line) in enumerate(self.current_page.lines):
+            # Split each record by a divider, or detect when a new result starts
+            if line.strip().startswith("[") and "]" in line:
+                # Start of new record
+                output_lines.append("")  # blank line before new record
+            output_lines.append(line)
+        content = "\n".join(output_lines)
         md = Markdown(content)
-        console.print(Panel(md, title="Markdown", border_style="white", width=width, expand=True))
+        self.console.print(Panel(md, title="Markdown", border_style="white", width=width, expand=True))
 
     def export_to_vault(self):
         if not self.current_page:
@@ -2291,16 +2359,21 @@ class DarkelfCLIBrowser:
             return
 
         if not self.current_page:
-            console.print(Panel("[blue]No page loaded.[/blue]", title="Darkelf CLI Browser", border_style="blue", width=width))
+            self.console.print(Panel(
+                Text("[blue]No page loaded.[/blue]", style=self.theme["content"]),
+                title="Darkelf CLI Browser",
+                border_style=self.theme["panel_border"],
+                width=width
+            ))
             self.render_footer(width)
             return
 
         header_text = Text.assemble(
-            ("Darkelf CLI Browser", "bold cyan"),
+            ("Darkelf CLI Browser", self.theme["header_text"]),
             f" | Tab {self.active_tab + 1}/{len(self.tabs)}\n",
-            (self.current_page.title or self.current_page.url, "blue underline")
+            (self.current_page.title or self.current_page.url, self.theme["link"])
         )
-        console.print(Panel(header_text, border_style="cyan", padding=(1, 2), width=width))
+        self.console.print(Panel(header_text, border_style=self.theme["panel_border"], padding=(1, 2), width=width))
 
         total_lines = len(self.current_page.lines) if self.current_page and self.current_page.lines else 0
         if total_lines:
@@ -2316,57 +2389,80 @@ class DarkelfCLIBrowser:
             if isinstance(w, Text):
                 content.append(w)
             else:
-                content.append(Text(w, style="white"))
-        console.print(Panel(Text.assemble(*content), title="\U0001f4f0 Page Content", border_style="white", width=width, expand=True))
+                content.append(Text(w, style=self.theme["content"]))
+        self.console.print(Panel(Text.assemble(*content), title="\U0001f4f0 Page Content", border_style=self.theme["panel_border"], width=width, expand=True))
 
         if self.current_page and self.current_page.lines:
             total_pages = max(1, (len(self.current_page.lines) + self.page_size - 1) // self.page_size)
             current_page = self.scroll + 1
             status = f"-- Page {current_page}/{total_pages} --"
-            console.print(Align.right(Text(status, style="bold green"), width=width))
+            self.console.print(Align.right(Text(status, style=f"bold {self.theme['footer_text']}"), width=width))
 
         self.render_footer(width)
 
         if self.tabs:
-            tabs_panel = Text.from_markup("[bold magenta]Open Tabs:[/bold magenta] ")
+            tabs_panel = Text.from_markup(f"[bold {self.theme['highlight']}]Open Tabs:[/bold {self.theme['highlight']}] ")
             for i, tab in enumerate(self.tabs):
                 mark = "*" if i == self.active_tab else " "
-                tab_title = tab.title if hasattr(tab, "title") and tab.title else tab.url
-                style = "green" if i == self.active_tab else ""
+                tab_title = getattr(tab, "title", getattr(tab, "url", "Tab"))
+                style = self.theme["highlight"] if i == self.active_tab else self.theme["footer_text"]
                 tabs_panel.append(f"{i+1}. {tab_title} {mark}  ", style=style)
-            console.print(Align.center(tabs_panel, width=width))
+            self.console.print(Align.center(tabs_panel, width=width))
 
     def render_footer(self, width):
-        console.print(Rule(style="grey30", characters="─"), width=width)
+        self.console.print(Rule(style=self.theme["divider"], characters="─"), width=width)
         footer = Text()
-        footer.append("[↑/↓/w/s/j/k] Prev/Next Page  ", style="bold green")
-        footer.append("[O] Open Link  ", style="bold cyan")
-        footer.append("[U] URL  ", style="bold magenta")
-        footer.append("[B] Back  ", style="bold yellow")
-        footer.append("[H] History  ", style="bold white")
-        footer.append("[T] Tabs  ", style="bold blue")
-        footer.append("[F] Search  ", style="bold green")
-        footer.append("[L] List Links  ", style="bold magenta")
-        footer.append("[E] Export Links  ", style="bold yellow")
-        footer.append("[V] Vault Export  ", style="bold green")
-        footer.append("[v] View Vault  ", style="bold blue")
-        footer.append("[G] Headings  ", style="bold magenta")
-        footer.append("[M] Markdown  ", style="bold yellow")
-        footer.append("[/] Search  ", style="bold bright_cyan")
-        footer.append("[N] Next match  ", style="bold bright_cyan")
-        footer.append("[?] Help  ", style="bold cyan")
+        footer.append("[↑/↓/w/s/j/k] Prev/Next Page  ", style=f"bold {self.theme['footer_text']}")
+        footer.append("[O] Open Link  ", style=f"bold {self.theme['footer_text']}")
+        footer.append("[U] URL  ", style=f"bold {self.theme['footer_text']}")
+        footer.append("[B] Back  ", style=f"bold {self.theme['footer_text']}")
+        footer.append("[H] History  ", style=f"bold {self.theme['footer_text']}")
+        footer.append("[T] Tabs  ", style=f"bold {self.theme['footer_text']}")
+        footer.append("[t] Themes  ", style=f"bold {self.theme['footer_text']}")
+        footer.append("[F] Search  ", style=f"bold {self.theme['footer_text']}")
+        footer.append("[L] List Links  ", style=f"bold {self.theme['footer_text']}")
+        footer.append("[E] Export Links  ", style=f"bold {self.theme['footer_text']}")
+        footer.append("[V] Vault Export  ", style=f"bold {self.theme['footer_text']}")
+        footer.append("[v] View Vault  ", style=f"bold {self.theme['footer_text']}")
+        footer.append("[G] Headings  ", style=f"bold {self.theme['footer_text']}")
+        footer.append("[M] Markdown  ", style=f"bold {self.theme['footer_text']}")
+        footer.append("[/] Search  ", style=f"bold {self.theme['footer_text']}")
+        footer.append("[N] Next match  ", style=f"bold {self.theme['footer_text']}")
+        footer.append("[?] Help  ", style=f"bold {self.theme['footer_text']}")
+        footer.append("[ESC] Wipe Vault/Return  ", style=f"bold {self.theme['highlight']}")  # Use green/cyan highlight
         footer.append("[Q] Quit", style="bold red")
-        console.print(Align.center(footer, width=width))
+        self.console.print(Align.center(footer, width=width))
+
+
+    def prompt_theme_menu(self):
+        self.console.print("\n[bold cyan]Choose a theme:[/bold cyan]")
+        theme_names = list(DARKELF_THEMES.keys())
+        for i, t in enumerate(theme_names, 1):
+            self.console.print(f"  {i}. {t}")
+        choice = input("Theme name or number: ").strip().lower()
+        if choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(theme_names):
+                theme = theme_names[idx]
+                self.set_theme(theme)
+                self.needs_render = True
+                return
+        elif choice in DARKELF_THEMES:
+            self.set_theme(choice)
+            self.needs_render = True
+            return
+        self.console.print(f"[red]Invalid theme: {choice}[/red]")
+        self.needs_render = True
 
     def render_help(self, width):
         header_text = Text.assemble(
-            ("Darkelf CLI Browser", "bold cyan"),
+            ("Darkelf CLI Browser", self.theme["header_text"]),
             f" | Tab {self.active_tab + 1}/{len(self.tabs)}\n",
-            (self.current_page.title or self.current_page.url if self.current_page else "No Page Loaded", "blue underline")
+            (self.current_page.title or self.current_page.url if self.current_page else "No Page Loaded", self.theme["link"])
         )
-        console.print(Panel(header_text, border_style="cyan", padding=(1, 2), width=width))
+        self.console.print(Panel(header_text, border_style=self.theme["panel_border"], padding=(1, 2), width=width))
         helptext = Text()
-        helptext.append(Text.from_markup("\n[bold cyan]Darkelf CLI Browser Help[/bold cyan]\n\n"))
+        helptext.append(Text.from_markup(f"\n[{self.theme['header_text']}]Darkelf CLI Browser Help[/{self.theme['header_text']}]\n\n"))
         helptext.append("[↑/↓/w/s/j/k] : Previous/next page (pagination)\n")
         helptext.append("[O]           : Open link by number\n")
         helptext.append("[U]           : Enter a URL\n")
@@ -2384,14 +2480,14 @@ class DarkelfCLIBrowser:
         helptext.append("[N]           : Next search match\n")
         helptext.append("[?]           : Show this help\n")
         helptext.append("[Q]           : Quit and clear screen\n")
-        helptext.append(Text.from_markup("\n[bold magenta]Tips:[/bold magenta] Use [O] to open numbered links, [L] to see all links, highlight search terms with /, export securely with V!\n"))
-        console.print(Panel(helptext, title="Help", border_style="cyan", width=width))
+        helptext.append(Text.from_markup(f"\n[bold {self.theme['highlight']}]Tips:[/bold {self.theme['highlight']}] Use [O] to open numbered links, [L] to see all links, highlight search terms with /, export securely with V!\n"))
+        self.console.print(Panel(helptext, title="Help", border_style=self.theme["panel_border"], width=width))
         self.render_footer(width)
-        console.print("\nPress any key to return.")
-        get_key()
+        self.console.print("\nPress any key to return.", style=self.theme["highlight"])
+        get_key()  # Wait for any keypress
         self.help_mode = False
         self.needs_render = True
-        
+
     def export_links(self):
         if not self.current_page or not self.current_page.links:
             console.print("[red]No links to export.[/red]")
@@ -2403,19 +2499,26 @@ class DarkelfCLIBrowser:
         console.print(f"[green]Links exported to {filename}[/green]")
 
     def render_links(self, width):
-        if self.current_page:
+        # Defensive patch: ensure self.current_page and .links are valid and non-empty
+        if not self.current_page or not hasattr(self.current_page, "links") or not self.current_page.links:
             header_text = Text.assemble(
-                ("Darkelf CLI Browser", "bold cyan"),
-                f" | Tab {self.active_tab + 1}/{len(self.tabs)}\n",
-                (self.current_page.title or self.current_page.url, "blue underline")
-            )
-        else:
-            header_text = Text.assemble(
-                ("Darkelf CLI Browser", "bold cyan"),
+                ("Darkelf CLI Browser", self.theme["header_text"]),
                 " | No Tab\n",
-                ("No Page Loaded", "blue underline")
+                ("No Page Loaded", self.theme["link"])
             )
-        console.print(Panel(header_text, border_style="cyan", padding=(1, 2), width=width))
+            self.console.print(Panel(header_text, border_style=self.theme["panel_border"], padding=(1, 2), width=width))
+            self.console.print(Panel(Text("No links found.", style=self.theme["highlight"]), title="Links", border_style=self.theme["panel_border"], width=width))
+            self.render_footer(width)
+            self.links_mode = False
+            self.needs_render = True
+            return
+
+        header_text = Text.assemble(
+            ("Darkelf CLI Browser", self.theme["header_text"]),
+            f" | Tab {self.active_tab + 1}/{len(self.tabs)}\n",
+            (self.current_page.title or self.current_page.url, self.theme["link"])
+        )
+        self.console.print(Panel(header_text, border_style=self.theme["panel_border"], padding=(1, 2), width=width))
 
         seen_urls = set()
         deduped_links = []
@@ -2425,20 +2528,20 @@ class DarkelfCLIBrowser:
                 seen_urls.add(href)
         fancy_divider = "═" * (width - 4)
         table = Table(show_header=False, box=None, expand=True)
-        table.add_column("Result", style="white", ratio=1)
+        table.add_column("Result", style=self.theme["content"], ratio=1)
         if deduped_links:
             for num, label, href in deduped_links:
                 link_text = Text()
-                link_text.append(f"[{num}] ", style="bold cyan")
-                link_text.append(label + "\n", style="bold green")
-                link_text.append(href, style="blue underline link " + href)
+                link_text.append(f"[{num}] ", style=self.theme["highlight"])
+                link_text.append(label + "\n", style=f"bold {self.theme['highlight']}")
+                link_text.append(href, style=f"{self.theme['link']} link {href}")
                 table.add_row(link_text)
-                table.add_row(Text(fancy_divider, style="bold magenta"))
+                table.add_row(Text(fancy_divider, style=f"bold {self.theme['divider']}"))
         else:
-            table.add_row(Text("No links found", style="yellow"))
-        console.print(table)
+            table.add_row(Text("No links found", style=self.theme["highlight"]))
+        self.console.print(table)
         self.render_footer(width)
-        console.print("\n[O] Open link by number | [E] Export links | Any key to return.")
+        self.console.print("\n[O] Open link by number | [E] Export links | Any key to return.")
 
         key = get_key().lower()
         if key == "o":
@@ -2459,11 +2562,11 @@ class DarkelfCLIBrowser:
                     self.visit(href)
                     return
                 else:
-                    console.print(f"[red]Invalid link number: {num}[/red]")
+                    self.console.print(f"[red]Invalid link number: {num}[/red]")
                     time.sleep(1)
                     self.needs_render = True
             except Exception as err:
-                console.print(f"[red]Invalid input: {err}[/red]")
+                self.console.print(f"[red]Invalid input: {err}[/red]")
                 time.sleep(1)
                 self.needs_render = True
         elif key == "e":
@@ -2487,13 +2590,13 @@ class DarkelfCLIBrowser:
                 self.visit(href)
                 return
             else:
-                console.print(f"[red]Invalid link number: {num}[/red]")
+                self.console.print(f"[red]Invalid link number: {num}[/red]")
                 time.sleep(1)
                 self.needs_render = True
         else:
             self.links_mode = False
             self.needs_render = True
-
+            
     def visit(self, url):
         try:
             if self.current_page:
@@ -2609,6 +2712,7 @@ class DarkelfCLIBrowser:
         self.simulate_search_prompt()
         while not self.quit:
             while self.needs_render:
+                self.clear()  # Alignment fix!
                 self.render()
                 self.needs_render = False
                 if not self.links_mode and not self.help_mode and self.current_page:
@@ -2616,7 +2720,14 @@ class DarkelfCLIBrowser:
                 break
 
             key = get_key()
-            if key == '\x1b[A' or key == 'w' or key == 'k':
+            # --- Robust ESC key handling: accept any sequence starting with ESC ---
+            if key.startswith('\x1b') and key not in ('\x1b[A', '\x1b[B'):
+                # Only treat ESC *not* up or down as quit/wipe!
+                self.vault.wipe_vault_files()
+                self.console.print(f"[bold {self.theme['highlight']}]KyberVault wiped. Returning to CLI menu.[/bold {self.theme['highlight']}]")
+                self.quit = True
+                break
+            elif key == '\x1b[A' or key == 'w' or key == 'k':
                 if self.current_page and self.scroll > 0:
                     self.scroll -= 1
                     self.needs_render = True
@@ -2626,6 +2737,7 @@ class DarkelfCLIBrowser:
                     if self.scroll + 1 < total_pages:
                         self.scroll += 1
                         self.needs_render = True
+                    # FIX: If at last page, do nothing. Don't quit, don't break, just stay.
             elif key == '/':
                 self.do_search()
             elif key == 'n':
@@ -2667,8 +2779,11 @@ class DarkelfCLIBrowser:
             elif key == 'h':
                 self.show_history()
                 self.needs_render = True
-            elif key == 't':
+            elif key == 'T':  # Shift+T for Tabs
                 self.manage_tabs()
+            elif key == 't':  # Lowercase t for Theme
+                self.prompt_theme_menu()
+                self.needs_render = True
             elif key == 'f':
                 self.simulate_search_prompt()
             elif key == '?':
@@ -2680,12 +2795,9 @@ class DarkelfCLIBrowser:
             elif key == 'q' or key == 'Q':
                 self.quit = True
                 break
-        self.secure_wipe()
         self.clear()
         sys.exit(0)
-
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
+        
 class DarkelfUtils:
     DUCKDUCKGO_LITE = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
     DUCKDUCKGO_HTML = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/html"
@@ -2881,7 +2993,6 @@ class DarkelfUtils:
             results["txt_records"] = intel.txt_records
             results["disposable"] = intel.disposable
             results["rdap"] = intel.creation_date
-            results["gravatar"] = intel.gravatar
             results["score"] = intel.score
             results["threat_label"] = re.sub(r"\[.*?\]", "", intel.threat_label())  # strip color tags
             results["breach"] = intel.breached
@@ -3782,13 +3893,13 @@ def repl_main():
     phishing_detector = PhishingDetectorZeroTrace(pq_logger=pq_logger)
     tor_manager = TorManagerCLI()
     tor_manager.init_tor()
-    
+
     # Start TLS monitor after 20s delay to allow Tor to bootstrap
     threading.Timer(20.0, start_tls_monitor).start()
 
     messenger = DarkelfMessenger()
     utils = DarkelfUtils()
-    
+
     console.print("🛡️  Darkelf CLI Browser - Stealth Mode - Auto Tor rotation, decoy traffic, onion discovery")
     print_help()
 
@@ -3818,7 +3929,7 @@ def repl_main():
             cmd = input("darkelf> ").strip()
             if not cmd:
                 continue
-                
+
             if cmd.isdigit():
                 index = int(cmd) - 1
                 if 0 <= index < len(TOOLS):
@@ -3835,12 +3946,11 @@ def repl_main():
             elif cmd == "checkip":
                 check_my_ip()
                 print()
-                
+
             elif cmd == "tlsstatus":
                 check_tls_status()
                 print()
 
-            # inside the REPL command checks
             elif cmd.startswith("beacon "):
                 onion = cmd.split(" ", 1)[1]
                 utils.beacon_onion_service(onion)
@@ -3855,22 +3965,22 @@ def repl_main():
             elif cmd == "dnsleak":
                 check_dns_leak()
                 print()
-                
-            elif cmd.startswith("analyze! "):  # exclamation = force
+
+            elif cmd.startswith("analyze! "):
                 url = cmd.split(" ", 1)[1].strip()
                 score = threat_score(url)
                 if score >= 5:
                     print(f"[THREAT] {url} scored {score}/10 on threat scale.")
-                    
+
             elif cmd.startswith("open "):
                 url = cmd.split(" ", 1)[1].strip()
                 fetch_and_display(url)
                 print()
-                
+
             elif cmd.startswith("emailintel "):
                 target = cmd.split(" ", 1)[1].strip()
                 EmailIntelPro(target, session=get_tor_session()).analyze()
-                
+
             elif cmd.startswith("emailhunt "):
                 email = cmd.split(" ", 1)[1].strip()
                 utils.do_emailhunt(email)
@@ -3888,7 +3998,7 @@ def repl_main():
             elif cmd == "toolinfo":
                 print_toolinfo()
                 print()
-                
+
             elif cmd == "help":
                 print_help()
                 print()
