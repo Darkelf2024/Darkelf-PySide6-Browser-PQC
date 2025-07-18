@@ -10,15 +10,17 @@ Darkelf CLI is a post-quantum hardened OSINT browser and messaging platform for 
 |------------------------------|-----------------------------------------------------------------------------|
 | 🔐 **Post-Quantum Messaging**  | ML-KEM-768 + Fernet hybrid encryption for encrypted CLI messaging            |
 | 🌐 **Tor-Based Browser**       | Full-text HTML browser routed over Tor (SOCKS5h proxy via obfs4 or standard) |
-| 🔎 **Darkelf OSINT Engine**   | Phone & email recon: carrier, location, VoIP check, timezones, no APIs       |
-| 🧠 **Phishing Detection**     | Heuristic scanning for malicious patterns, typosquatting & spoofed domains   |
-| 💀 **Panic Mode**             | Erases logs, memory dumps, clears env state, triggers decoy traffic         |
-| 🎭 **Stealth Enhancements**   | Memory locking, header spoofing, random jitter, decoys, sandbox detection    |
-| 🧪 **Log Encryption**         | AES-GCM logs encrypted in memory using PQC-derived secrets                   |
-| 🧩 **Tool Launcher**          | Launch recon tools like `nmap`, `amass`, `shodan`, `whatweb`, `dmitry`       |
-| 🕵️ **.onion Search Engine**   | Onion site discovery via Ahmia and DDG onion mirror queries                  |
-| 📱 **Phone OSINT**            | Detect validity, carrier name, VoIP status, leaks (no PhoneInfoga used)     |
-| ✉️ **Email Intelligence**     | DNS/MX, RDAP, disposable checks, breaches, gravatar hash, TXT records       |
+| 🔎 **Darkelf OSINT Engine**   | Phone, email & username recon with zero APIs — DDG Onion, DNS, RDAP, leaks   |
+| 🧠 **Phishing Detection**     | Spoofed domains, lookalikes, open directories, typosquatting                 |
+| 💀 **Panic Mode**             | Erases memory, logs, local state, and triggers decoy traffic                |
+| 🔐 **Secure Vault**           | AES-GCM encrypted storage for sensitive recon results and CLI session logs  |
+| 🎭 **Stealth Enhancements**   | Memory locking, decoy background threads, header spoofing, sandbox check     |
+| 🧪 **Log Encryption**         | AES-GCM encrypted logs in volatile memory, wiped on exit                    |
+| 🧩 **Tool Launcher**          | CLI runner for OSINT tools: `nmap`, `shodan`, `amass`, `whatweb`, etc.      |
+| 🕵️ **.onion Search Engine**   | Onion discovery via Ahmia and DuckDuckGo Onion mirror                       |
+| 📱 **Phone OSINT**            | Validity, region, VoIP & carrier check with no PhoneInfoga                  |
+| ✉️ **Email Intelligence**     | MX/DNS/TXT records, RDAP, breach checks, gravatar, threat scoring           |
+| 📬 **EmailHunt Engine**       | Profile discovery from email/usernames on GitHub, Reddit, StackOverflow     |
 
 ---
 
@@ -32,8 +34,20 @@ Darkelf CLI is a post-quantum hardened OSINT browser and messaging platform for 
 - **Tool Hub:** Launches external OSINT tools from a unified REPL interface.
 - **Tor Beacon & Onion Validation:** Pings `.onion` services for uptime and status checks.
 - **Fake Traffic Generator:** Background activity simulation to confuse behavioral forensics.
+- **Secure Vault:** Stores sensitive session artifacts encrypted, supports purge/export.
 
 ---
+
+## 🗄️ Secure Vault
+
+Darkelf includes a memory-safe **Secure Vault** system that:
+- 💾 Stores session logs, email/phone recon data, and Onion scans
+- 🔐 Uses AES-GCM with optional hybrid PQ key-wrapping (`ML-KEM-768`)
+- 🧼 Supports zeroization on exit or `panic` command
+- 🔍 Vault entries can be listed, exported, or searched inside the REPL
+- 🛡️ Optionally syncs across encrypted temp volumes if used in air-gapped systems
+
+Use the REPL to manage your Vault:
 
 ## 🔧 Installation
 
@@ -68,7 +82,8 @@ Use the REPL prompt for commands like:
 - `search <query>` — DuckDuckGo .onion search
 - `osintscan <phone|username>` — OSINT scan on target
 - `message send` — Start encrypted messaging
-- `panic` — Trigger panic mode
+- `vault show/export/clear` — Manage secure Vault entries
+- `wipe` — Trigger panic mode
 - `launch <tool>` — Run an integrated OSINT utility
 - `beacon <onion>` — Check onion site status
 - `exit` — Quit securely
@@ -111,8 +126,3 @@ This project includes:
 ## 📫 Feedback & Contributions
 
 Feel free to submit issues, patches, or modules. All tooling is designed with privacy, auditability, and operational flexibility in mind.
-
----
-
-**Built for those who operate in the shadows.** 🕶  
-Stay quiet. Stay hardened. Stay Darkelf.
