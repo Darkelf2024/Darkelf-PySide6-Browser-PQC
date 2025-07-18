@@ -3118,7 +3118,25 @@ class DarkelfUtils:
         else:
             console.print("[yellow]⚠ No usable links found. Trying fallback like 'search' command...[/yellow]\n")
             self.fetch_and_display_links(query)  # fallback
-
+            
+    def beacon_onion_service(self, onion_url):
+        socks_proxy = "socks5h://127.0.0.1:9052"
+        if not onion_url.startswith("http"):
+            onion_url = "http://" + onion_url
+        try:
+            r = requests.get(
+                onion_url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                proxies={"http": socks_proxy, "https": socks_proxy},
+                timeout=15
+            )
+            if r.status_code < 400:
+                console.print(f"[🛰] Onion service is live: {onion_url} (Status {r.status_code})")
+            else:
+                console.print(f"[⚠] Onion responded with status {r.status_code}")
+        except Exception as e:
+            console.print(f"[🚫] Failed to reach onion service: {e}")
+            
 DUCKDUCKGO_LITE = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
 
 DISPOSABLE_CARRIERS = {
@@ -3126,15 +3144,6 @@ DISPOSABLE_CARRIERS = {
     "talkatone", "burner", "hushed", "sideline", "line2", "freetone", "voip"
 }
 
-async def beacon_onion_service(url):
-    connector = ProxyConnector.from_url("socks5://127.0.0.1:9052")
-    try:
-        async with aiohttp.ClientSession(connector=connector) as session:
-            async with session.get(url, timeout=10) as r:
-                return (url, r.status == 200)
-    except Exception:
-        return (url, False)
-        
 async def passive_monitor_loop(watch_term, interval=3600):
     while True:
         results = await async_duckduckgo_search(f'"{watch_term}" site:pastebin.com')
