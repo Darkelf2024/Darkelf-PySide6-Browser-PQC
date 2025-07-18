@@ -56,6 +56,8 @@ import sys
 import time
 import argparse
 import logging
+import aiohttp
+import aiohttp_socks
 import asyncio
 import mmap
 import ctypes
@@ -85,10 +87,11 @@ import ipaddress
 import dns.resolver
 import phonenumbers
 import textwrap
+import psutil
 from collections import deque
 from typing import Optional, List, Dict
 from datetime import datetime
-import psutil
+from aiohttp_socks import ProxyConnector
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
@@ -171,15 +174,16 @@ class EmailIntelPro:
     def check_disposable(self):
         self.disposable = self.domain in self.DISPOSABLE_DOMAINS
 
-    def check_rdap(self):
+    async def check_rdap(self):
         try:
-            res = self.session.get(f"https://rdap.org/domain/{self.domain}", timeout=10)
-            if res.ok:
-                data = res.json()
-                for event in data.get("events", []):
-                    if event.get("eventAction") == "registration":
-                        self.creation_date = event.get("eventDate", "Unknown")
-        except:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"https://rdap.org/domain/{self.domain}", timeout=10) as res:
+                    if res.status == 200:
+                        data = await res.json()
+                        for event in data.get("events", []):
+                            if event.get("eventAction") == "registration":
+                                self.creation_date = event.get("eventDate", "Unknown")
+        except Exception:
             self.creation_date = "Unknown"
 
     def calculate_score(self):
@@ -197,7 +201,7 @@ class EmailIntelPro:
         else:
             return "[green]LOW[/green]"
 
-    def analyze(self):
+    async def analyze(self):
         if not self.is_valid_email():
             self.console.print(f"[red]❌ Invalid email: {self.email}[/red]")
             return
@@ -205,7 +209,7 @@ class EmailIntelPro:
         self.fetch_mx_records()
         self.fetch_txt_records()
         self.check_disposable()
-        self.check_rdap()
+        await self.check_rdap()
         self.calculate_score()
 
         table = Table(title=f"📧 Enhanced Email Intel for [bold]{self.email}[/bold]", show_lines=True)
@@ -268,13 +272,16 @@ font = FontManager(stealth_mode=True, randomize=True)
 # Example usage:
 font.print("Darkelf CLI — Secure Terminal Loaded")
 
-class IPLookup:
-    def __init__(self, use_tor=False, timeout=10):
+class DarkelfIPScan:
+    def __init__(self, use_tor=True, timeout=10):
         self.console = Console()
         self.timeout = timeout
         self.use_tor = use_tor
-        self.api_url_primary = "http://ip-api.com/json/{}"
-        self.api_url_fallback = "https://ipwho.is/{}"
+        self.api_urls = [
+            "http://ip-api.com/json/{}",      # primary
+            "https://ipwho.is/{}",            # fallback 1
+            "https://ipinfo.io/{}/json"       # fallback 2
+        ]
         self.proxies = {
             "http": "socks5h://127.0.0.1:9052",
             "https": "socks5h://127.0.0.1:9052"
@@ -288,19 +295,21 @@ class IPLookup:
             return False
 
     def get_public_ip(self):
-        try:
-            r = requests.get("http://api.ipify.org", timeout=self.timeout, proxies=self.proxies)
-            ip = r.text.strip()
-            # Validate IP before returning
+        ip_sources = [
+            "https://icanhazip.com",
+            "https://check.torproject.org/api/ip",
+            "https://api64.ipify.org"
+        ]
+        for url in ip_sources:
             try:
+                r = requests.get(url, timeout=self.timeout, proxies=self.proxies)
+                ip = r.text.strip()
                 ipaddress.ip_address(ip)
                 return ip
-            except ValueError:
-                self.console.print(f"[red]Invalid IP response from api.ipify.org: {ip}[/red]")
-                return None
-        except Exception as e:
-            self.console.print(f"[red]Failed to fetch public IP: {e}[/red]")
-            return None
+            except Exception:
+                continue
+        self.console.print("[red]❌ All public IP sources failed[/red]")
+        return None
 
     def lookup(self, ip=""):
         target_ip = ip.strip() if ip else self.get_public_ip()
@@ -311,36 +320,25 @@ class IPLookup:
             self.console.print(f"[red]Invalid IP format: {target_ip}[/red]")
             return
 
-        # Try primary API
-        try:
-            r = requests.get(self.api_url_primary.format(target_ip), timeout=self.timeout, proxies=self.proxies)
-            if r.status_code == 429:
-                self.console.print("[yellow]Rate limit exceeded on ip-api.com. Trying fallback...[/yellow]")
-                return self._lookup_fallback(target_ip)
+        for api_url in self.api_urls:
+            try:
+                r = requests.get(api_url.format(target_ip), timeout=self.timeout, proxies=self.proxies)
+                data = r.json()
 
-            data = r.json()
-            if data.get("status") != "success":
-                self.console.print(f"[yellow]Primary API failed: {data.get('message', 'unknown error')}[/yellow]")
-                return self._lookup_fallback(target_ip)
+                # Handle common API error signals
+                if "status" in data and data["status"] != "success":
+                    raise Exception(data.get("message", "status != success"))
+                if "success" in data and not data["success"]:
+                    raise Exception(data.get("message", "lookup failed"))
 
-            self._print_table(data, source="ip-api.com")
-        except Exception as e:
-            self.console.print(f"[yellow]Primary API error: {e} — trying fallback...[/yellow]")
-            self._lookup_fallback(target_ip)
-
-    def _lookup_fallback(self, ip):
-        try:
-            r = requests.get(self.api_url_fallback.format(ip), timeout=self.timeout, proxies=self.proxies)
-            data = r.json()
-            if not data.get("success", False):
-                self.console.print(f"[red]Fallback lookup failed for {ip}: {data.get('message', 'unknown error')}[/red]")
+                self._print_table(data, source=api_url.split('/')[2])
                 return
+            except Exception as e:
+                self.console.print(f"[yellow]⚠️ API error: {e} — trying next[/yellow]")
 
-            self._print_table(data, source="ipwho.is")
-        except Exception as e:
-            self.console.print(f"[red]Fallback API error: {e}[/red]")
+        self.console.print(f"[red]❌ All lookups failed for {target_ip}[/red]")
 
-    def _print_table(self, data, source="ip-api.com"):
+    def _print_table(self, data, source="unknown"):
         table = Table(title=f"IP Lookup for {data.get('ip', data.get('query', 'Unknown'))} [dim](via {source})[/dim]")
         fields = {
             "IP": data.get("ip") or data.get("query"),
@@ -1186,45 +1184,43 @@ class TorManagerCLI:
     def close(self):
         self.stop_tor()
 
-def duckduckgo_search(query):
-    time.sleep(random.uniform(2, 5))
+# Optional: Use aiohttp_socks if routing through Tor
+try:
+    from aiohttp_socks import ProxyConnector
+except ImportError:
+    ProxyConnector = None
 
-    headers = {
-        'User-Agent': 'Mozilla/5.0',
-    }
-
+async def async_duckduckgo_search(query, tor_proxy="socks5://127.0.0.1:9052", max_results=10):
+    await asyncio.sleep(0.2)
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    url = DUCKDUCKGO_LITE + f"?q={quote_plus(query)}"
+    connector = ProxyConnector.from_url(tor_proxy)
     try:
-        session = requests.Session()
-        session.proxies = {
-            'http': get_tor_proxy(),
-            'https': get_tor_proxy(),
-        }
-        url = DUCKDUCKGO_LITE + f"?q={quote_plus(query)}"
-        response = session.get(url, headers=headers, timeout=20)
-
-        soup = BeautifulSoup(response.text, 'html.parser')
-        results = []
-
-        # DuckDuckGo Lite format: <a rel="nofollow" class="result-link" href="...">Title</a>
-        for a in soup.find_all("a", href=True):
-            if "result" in a.get("class", []) or "nofollow" in a.get("rel", []):
-                href = html.unescape(a["href"])
-                text = a.get_text(strip=True)
-                if href.startswith(("http://", "https://")) and text:
-                    results.append((text, href))
-
-        if not results:
-            debug_path = f"/tmp/ddg_debug_{query.replace(' ', '_')}.html"
-            with open(debug_path, "w", encoding="utf-8") as f:
-                f.write(response.text)
-            console.print(f"[Darkelf] Parsing failed for '{query}'. Saved raw HTML to {debug_path}")
-
-        return results
-
-    except Exception as e:
-        console.print(f"[Darkelf] DuckDuckGo search error for '{query}': {e}")
+        async with aiohttp.ClientSession(connector=connector) as session:
+            async with session.get(url, headers=headers, timeout=20) as response:
+                if response.status != 200:
+                    return []
+                html_content = await response.text()
+                soup = BeautifulSoup(html_content, 'html.parser')
+                results = []
+                for a in soup.find_all("a", href=True):
+                    if "result" in a.get("class", []) or "nofollow" in a.get("rel", []):
+                        href = html.unescape(a["href"])
+                        text = a.get_text(strip=True)
+                        if href.startswith(("http://", "https://")) and text:
+                            results.append((text, href))
+                        if len(results) >= max_results:
+                            break
+                return results
+    except Exception:
         return []
 
+async def async_batch_duckduckgo_search(queries):
+    return await asyncio.gather(*(async_duckduckgo_search(q) for q in queries))
+
+async def async_batch_duckduckgo_search(queries):
+    return await asyncio.gather(*(async_duckduckgo_search(q) for q in queries))
+    
 def get_tor_proxy():
     return f"socks5h://127.0.0.1:9052"
 
@@ -2346,9 +2342,8 @@ class DarkelfCLIBrowser:
                 self.console.print(f"[red]Failed to decrypt: {e}[/red]")
 
     def render(self):
-        self.clear()
+        # DO NOT clear or print blank lines here!
         term_size = shutil.get_terminal_size((80, 24))
-        self.height = max(10, term_size.lines - 10)
         width = term_size.columns
 
         if self.help_mode:
@@ -2373,7 +2368,7 @@ class DarkelfCLIBrowser:
             f" | Tab {self.active_tab + 1}/{len(self.tabs)}\n",
             (self.current_page.title or self.current_page.url, self.theme["link"])
         )
-        self.console.print(Panel(header_text, border_style=self.theme["panel_border"], padding=(1, 2), width=width))
+        self.console.print(Panel(header_text, border_style=self.theme["panel_border"], padding=(0, 1), width=width))
 
         total_lines = len(self.current_page.lines) if self.current_page and self.current_page.lines else 0
         if total_lines:
@@ -2429,10 +2424,11 @@ class DarkelfCLIBrowser:
         footer.append("[/] Search  ", style=f"bold {self.theme['footer_text']}")
         footer.append("[N] Next match  ", style=f"bold {self.theme['footer_text']}")
         footer.append("[?] Help  ", style=f"bold {self.theme['footer_text']}")
-        footer.append("[ESC] Wipe Vault/Return  ", style=f"bold {self.theme['highlight']}")  # Use green/cyan highlight
+        footer.append("[ESC] Wipe Vault/Return  ", style=f"bold {self.theme['highlight']}")
         footer.append("[Q] Quit", style="bold red")
+        # Function key to return to CLI menu
+        footer.append("[F1] Main Menu", style="bold magenta")
         self.console.print(Align.center(footer, width=width))
-
 
     def prompt_theme_menu(self):
         self.console.print("\n[bold cyan]Choose a theme:[/bold cyan]")
@@ -2460,7 +2456,7 @@ class DarkelfCLIBrowser:
             f" | Tab {self.active_tab + 1}/{len(self.tabs)}\n",
             (self.current_page.title or self.current_page.url if self.current_page else "No Page Loaded", self.theme["link"])
         )
-        self.console.print(Panel(header_text, border_style=self.theme["panel_border"], padding=(1, 2), width=width))
+        self.console.print(Panel(header_text, border_style=self.theme["panel_border"], padding=(0, 1), width=width))
         helptext = Text()
         helptext.append(Text.from_markup(f"\n[{self.theme['header_text']}]Darkelf CLI Browser Help[/{self.theme['header_text']}]\n\n"))
         helptext.append("[↑/↓/w/s/j/k] : Previous/next page (pagination)\n")
@@ -2506,7 +2502,7 @@ class DarkelfCLIBrowser:
                 " | No Tab\n",
                 ("No Page Loaded", self.theme["link"])
             )
-            self.console.print(Panel(header_text, border_style=self.theme["panel_border"], padding=(1, 2), width=width))
+            self.console.print(Panel(header_text, border_style=self.theme["panel_border"], padding=(0, 1), width=width))
             self.console.print(Panel(Text("No links found.", style=self.theme["highlight"]), title="Links", border_style=self.theme["panel_border"], width=width))
             self.render_footer(width)
             self.links_mode = False
@@ -2712,7 +2708,7 @@ class DarkelfCLIBrowser:
         self.simulate_search_prompt()
         while not self.quit:
             while self.needs_render:
-                self.clear()  # Alignment fix!
+                # self.clear()  # Alignment fix!
                 self.render()
                 self.needs_render = False
                 if not self.links_mode and not self.help_mode and self.current_page:
@@ -3001,25 +2997,6 @@ class DarkelfUtils:
             console.print(f"[red][ERROR][/red] Failed to run email scraper: {e}")
         return results
 
-    def beacon_onion_service(self, onion_url):
-        socks_proxy = "socks5h://127.0.0.1:9052"
-        
-        if not onion_url.startswith("http"):
-            onion_url = "http://" + onion_url
-        try:
-            r = requests.get(
-                onion_url,
-                headers={"User-Agent": "Mozilla/5.0"},
-                proxies={"http": socks_proxy, "https": socks_proxy},
-                timeout=15
-            )
-            if r.status_code < 400:
-                console.print(f"[🛰] Onion service is live: {onion_url} (Status {r.status_code})")
-            else:
-                console.print(f"[⚠] Onion responded with status {r.status_code}")
-        except Exception as e:
-            console.print(f"[🚫] Failed to reach onion service: {e}")
-            
     def fetch_and_display_links(self, term: str, max_results: int = 30):
         """
         Mimics the 'search' command: fetches URLs from DuckDuckGo and prints only titles + links.
@@ -3149,6 +3126,24 @@ DISPOSABLE_CARRIERS = {
     "talkatone", "burner", "hushed", "sideline", "line2", "freetone", "voip"
 }
 
+async def beacon_onion_service(url):
+    connector = ProxyConnector.from_url("socks5://127.0.0.1:9052")
+    try:
+        async with aiohttp.ClientSession(connector=connector) as session:
+            async with session.get(url, timeout=10) as r:
+                return (url, r.status == 200)
+    except Exception:
+        return (url, False)
+        
+async def passive_monitor_loop(watch_term, interval=3600):
+    while True:
+        results = await async_duckduckgo_search(f'"{watch_term}" site:pastebin.com')
+        if results:
+            print(f"🔔 ALERT: Leak found for {watch_term}")
+            for title, link in results:
+                print(f"- {title}: {link}")
+        await asyncio.sleep(interval)
+        
 def generate_darkelf_dorks(phone_number):
     DUCKDUCKGO_LITE = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
     clean = phone_number.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
@@ -3329,6 +3324,7 @@ def osintscan(query, use_tor=True, max_results=10):
         try:
             intel = EmailIntelPro(email, session=get_tor_session() if use_tor else requests.Session())
             if intel.is_valid_email():
+                asyncio.run(intel.analyze())
                 results["emails"].append(email)
         except Exception:
             pass
@@ -3959,7 +3955,7 @@ def repl_main():
             elif cmd.startswith("iplookup"):
                 parts = cmd.split()
                 ip = parts[1] if len(parts) > 1 else ""
-                IPLookup(use_tor=True).lookup(ip)
+                DarkelfIPScan(use_tor=True).lookup(ip)
                 print()
 
             elif cmd == "dnsleak":
@@ -3979,7 +3975,7 @@ def repl_main():
 
             elif cmd.startswith("emailintel "):
                 target = cmd.split(" ", 1)[1].strip()
-                EmailIntelPro(target, session=get_tor_session()).analyze()
+                asyncio.run(EmailIntelPro(target, session=get_tor_session()).analyze())
 
             elif cmd.startswith("emailhunt "):
                 email = cmd.split(" ", 1)[1].strip()
@@ -4124,4 +4120,3 @@ if __name__ == "__main__":
     # Step 5: In-memory log cleanup
     for category in pq_logger.logs:
         pq_logger.logs[category].clear()
-
