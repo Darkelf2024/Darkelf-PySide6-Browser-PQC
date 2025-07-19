@@ -92,7 +92,7 @@ python Darkelf\ CLI\ TL\ Browser.py
 
 ### Command:
 ```bash
-pegasus
+pegasusmonitor in Darkelf CLI 
 ```
 
 Scans logs and network connections for indicators of Pegasus spyware and similar surveillance threats.
