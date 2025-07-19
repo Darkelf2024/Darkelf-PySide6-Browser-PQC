@@ -29,7 +29,7 @@ phonenumbers
 rich
 
 # Install the Python wrapper that matches your native liboqs version
-pip install liboqs-python==0.12.0  # or 0.13.0
+pip install liboqs-python==0.12.0  # or rename liboqs-python version to 0.13.0 with nano pyproject.toml - your liboqs-python location only if you install liboqs 0.13.0
 
 
 # These will be updated soon
