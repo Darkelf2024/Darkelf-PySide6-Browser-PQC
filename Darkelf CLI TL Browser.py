@@ -100,8 +100,11 @@ from rich.align import Align
 from rich.table import Table
 from collections import defaultdict
 from textwrap import wrap
+from getpass import getpass
 from urllib.parse import quote_plus, unquote, parse_qs, urlparse, urljoin
 from bs4 import BeautifulSoup
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.backends import default_backend
 from oqs import KeyEncapsulation
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -127,7 +130,118 @@ def get_tor_session():
         "https": "socks5h://127.0.0.1:9052",
     }
     return session
+    
+class PegasusMonitor:
+    def __init__(self):
+        self.ioc_domains = [
+            "akamaitechcloudservices.com", "cloudfront-service.com", "krakenfiles.com",
+            "apple-mobile-service.com", "pushupdates.net", "pushedwebcontent.com",
+            "icloud-sync.net", "signal-authenticator.net", "cdn-whatsapp.com"
+        ]
+        self.ioc_keywords = [
+            "mprotect", "mmap", "execve", "sandbox escape", "rootkit", "surveillance agent"
+        ]
+        self.safe_processes = [
+            "corespeechd", "replayd", "helpd", "UserEventAgent",
+            "mediaanalysisd", "imagent", "searchpartyuseragent", "sirittsd"
+        ]
+        self.system = platform.system()
+        self.is_windows = self.system == "Windows"
+        self.is_macos = self.system == "Darwin"
+        self.is_android_or_linux = self.system == "Linux"
 
+    def _run(self, command):
+        try:
+            return os.popen(command).read().splitlines()
+        except:
+            return []
+
+    def _write_hosts(self, path):
+        try:
+            current = ""
+            try:
+                with open(path, "r") as f:
+                    current = f.read()
+            except:
+                pass
+
+            with open(path, "a") as f:
+                for domain in self.ioc_domains:
+                    if domain not in current:
+                        f.write(f"0.0.0.0 {domain}\n")
+            return True
+        except:
+            return False
+
+    def _is_suspicious_log(self, line):
+        # Avoid known benign Apple services
+        if any(proc in line for proc in self.safe_processes):
+            return False
+
+        # Score based on suspicious keywords
+        score = 0
+        if "execve" in line: score += 2
+        if "mmap" in line: score += 1
+        if "mprotect" in line: score += 1
+        if "sandbox escape" in line: score += 3
+        if "rootkit" in line: score += 3
+
+        return score >= 3
+
+    def _report(self, logs, conns):
+        found = False
+
+        suspicious_logs = [line for line in logs if self._is_suspicious_log(line)]
+        if suspicious_logs:
+            print("📄 Suspicious log entries:")
+            for line in suspicious_logs:
+                print("  •", line)
+            found = True
+        else:
+            print("✅ No suspicious log activity found.")
+
+        flagged_conns = []
+        for line in conns:
+            if any(domain in line for domain in self.ioc_domains):
+                flagged_conns.append(line)
+
+        if flagged_conns:
+            print("\n🌐 Network activity with potential C2 servers:")
+            for line in flagged_conns:
+                print("  •", line)
+            found = True
+        else:
+            print("✅ No suspicious network activity found.")
+
+        if not found:
+            print("\n✅ No Pegasus indicators detected.\n")
+
+    def run(self):
+        print(f"\n🛡️ [PegasusMonitor] Running Pegasus Defense Scan on {self.system}...\n")
+        logs, conns = [], []
+
+        if self.is_macos:
+            logs = self._run("log show --style syslog --last 1d | grep -i 'mprotect\\|mmap\\|execve'")
+            conns = self._run("netstat -an")
+            self._write_hosts("/etc/hosts")
+
+        elif self.is_android_or_linux:
+            logs = self._run("logcat -d | grep -i 'mprotect\\|execve'")
+            conns = self._run("cat /proc/net/tcp")
+            self._write_hosts("/etc/hosts")
+
+        elif self.is_windows:
+            logs = self._run("wevtutil qe System /f:text /c:300")
+            conns = self._run("netstat -an")
+            self._write_hosts("C:\\Windows\\System32\\drivers\\etc\\hosts")
+
+        else:
+            print("⚠️ Unsupported platform.")
+            return
+
+        self._report(logs, conns)
+        print("\n🔒 Pegasus defense scan complete.\n")
+        
 class EmailIntelPro:
     DISPOSABLE_DOMAINS = {
         "mailinator.com", "10minutemail.com", "tempmail.com", "guerrillamail.com",
@@ -1309,9 +1423,21 @@ class EphemeralPQKEM:
     def decap_secret(self, ciphertext):
         return self.kem.decap_secret(ciphertext)  # uses internal key
 
+console = Console()
+
 class DarkelfMessenger:
     def __init__(self, kem_algo="Kyber768"):
         self.kem_algo = kem_algo
+
+    def _derive_password_key(self, password, salt):
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=100000,
+            backend=default_backend()
+        )
+        return base64.urlsafe_b64encode(kdf.derive(password.encode()))
 
     def generate_keys(self, pubkey_path="my_pubkey.bin", privkey_path="my_privkey.bin"):
         kem = oqs.KeyEncapsulation(self.kem_algo)
@@ -1320,10 +1446,16 @@ class DarkelfMessenger:
 
         with open(pubkey_path, "wb") as f:
             f.write(public_key)
-        with open(privkey_path, "wb") as f:
-            f.write(private_key)
 
-        logging.info("🔐 Keys saved: %s, %s", pubkey_path, privkey_path)
+        password = getpass("🔐 Set password to protect your private key: ")
+        salt = os.urandom(16)
+        key = self._derive_password_key(password, salt)
+        encrypted = Fernet(key).encrypt(private_key)
+
+        with open(privkey_path, "wb") as f:
+            f.write(b"vKEY||" + base64.b64encode(salt) + b"||" + base64.b64encode(encrypted))
+
+        logging.info("🔐 Encrypted private key saved to: %s", privkey_path)
 
     def send_message(self, recipient_pubkey_path, message_text, output_path="msg.dat"):
         if not os.path.exists(recipient_pubkey_path):
@@ -1333,22 +1465,27 @@ class DarkelfMessenger:
             logging.error("Message cannot be empty.")
             return 1
 
+        password = getpass("🔐 Set a password to protect this message: ")
         kem = oqs.KeyEncapsulation(self.kem_algo)
+
         with open(recipient_pubkey_path, "rb") as f:
             pubkey = f.read()
 
         ciphertext, shared_secret = kem.encap_secret(pubkey)
-        key = base64.urlsafe_b64encode(shared_secret[:32])
-        token = Fernet(key).encrypt(message_text.encode())
+        fernet_key = base64.urlsafe_b64encode(shared_secret[:32])
+        message_token = Fernet(fernet_key).encrypt(message_text.encode())
 
-        # Base64 encode the ciphertext and token to avoid delimiter collision
-        ct_b64 = base64.b64encode(ciphertext)
-        token_b64 = base64.b64encode(token)
+        salt = os.urandom(16)
+        password_key = self._derive_password_key(password, salt)
+        encrypted_fernet_key = Fernet(password_key).encrypt(fernet_key)
 
         with open(output_path, "wb") as f:
-            f.write(b"v1||" + ct_b64 + b"||" + token_b64)
+            f.write(b"v2||" + base64.b64encode(ciphertext) + b"||" +
+                    base64.b64encode(encrypted_fernet_key) + b"||" +
+                    base64.b64encode(salt) + b"||" +
+                    base64.b64encode(message_token))
 
-        logging.info("📤 Message saved to: %s", output_path)
+        logging.info("📤 Encrypted and saved message to: %s", output_path)
         return 0
 
     def receive_message(self, privkey_path="my_privkey.bin", msg_path="msg.dat"):
@@ -1362,28 +1499,42 @@ class DarkelfMessenger:
         with open(msg_path, "rb") as f:
             content = f.read()
 
-        if not content.startswith(b"v1||"):
-            logging.error("Message format invalid or corrupted.")
+        if not content.startswith(b"v2||"):
+            logging.error("Invalid or unsupported message format.")
             return 1
 
         try:
-            _, ct_b64, token_b64 = content.split(b"||", 2)
+            _, ct_b64, enc_key_b64, salt_b64, token_b64 = content.split(b"||", 4)
             ciphertext = base64.b64decode(ct_b64)
+            enc_fernet_key = base64.b64decode(enc_key_b64)
+            msg_salt = base64.b64decode(salt_b64)
             token = base64.b64decode(token_b64)
 
             with open(privkey_path, "rb") as f:
-                privkey = f.read()
+                priv_data = f.read()
 
-            # Pass secret_key=privkey to the constructor
+            if not priv_data.startswith(b"vKEY||"):
+                logging.error("Private key format invalid.")
+                return 1
+
+            _, key_salt_b64, encrypted_privkey_b64 = priv_data.split(b"||", 2)
+            key_salt = base64.b64decode(key_salt_b64)
+            encrypted_privkey = base64.b64decode(encrypted_privkey_b64)
+
+            password = getpass("🔑 Enter password for your private key: ")
+            password_key = self._derive_password_key(password, key_salt)
+            privkey = Fernet(password_key).decrypt(encrypted_privkey)
+
             kem = oqs.KeyEncapsulation(self.kem_algo, secret_key=privkey)
             shared_secret = kem.decap_secret(ciphertext)
 
-            key = base64.urlsafe_b64encode(shared_secret[:32])
-            message = Fernet(key).decrypt(token)
+            fernet_key = Fernet(self._derive_password_key(password, msg_salt)).decrypt(enc_fernet_key)
+            message = Fernet(fernet_key).decrypt(token)
+
             console.print("📥 Message decrypted:", message.decode())
             return 0
         except Exception as e:
-            logging.error("Decryption failed: %s", e)
+            logging.error("❌ Decryption failed: %s", e)
             return 1
 
 def fetch_with_requests(url, session=None, extra_stealth_options=None, debug=False, method="GET", data=None):
@@ -1680,7 +1831,8 @@ def print_help():
             ("analyze! <url>",        "Analyze a URL for threat trackers"),
             ("open <url>",            "Open and fetch a full URL (tracker-safe)"),
             ("emailintel",            "Lookup MX Information"),
-            ("emailhunt",             "Collect Information")
+            ("emailhunt",             "Collect Information"),
+            ("pegasusmonitor",        "Run Pegasus Infection Check")
         ]),
 
         ("Tools and Utilities", [
@@ -3990,7 +4142,12 @@ def repl_main():
                 email = cmd.split(" ", 1)[1].strip()
                 utils.do_emailhunt(email)
                 print()
-
+                
+            elif cmd == "pegasusmonitor":
+                pegasus = PegasusMonitor()
+                pegasus.run()
+                print()
+                
             elif cmd == "tools":
                 print_tools_help()
                 print()
@@ -4129,3 +4286,4 @@ if __name__ == "__main__":
     # Step 5: In-memory log cleanup
     for category in pq_logger.logs:
         pq_logger.logs[category].clear()
+
