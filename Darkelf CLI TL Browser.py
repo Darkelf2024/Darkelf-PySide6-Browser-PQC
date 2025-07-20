@@ -114,6 +114,7 @@ from requests import Response
 from phonenumbers import carrier, geocoder, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.markdown import Markdown
+from aiohttp import ClientTimeout
 import requests
 
 # --- Tor integration via Stem ---
@@ -131,6 +132,107 @@ def get_tor_session():
     }
     return session
     
+class DarkelfSpiderAsync:
+    def __init__(self, base_url, depth=2, delay=1.5, keyword_filters=None, extract_data=True, use_tor=False):
+        self.base_url = base_url.rstrip('/')
+        self.domain = urlparse(base_url).netloc
+        self.depth = depth
+        self.delay = delay
+        self.keyword_filters = keyword_filters or []
+        self.extract_data = extract_data
+        self.use_tor = use_tor
+        self.visited = set()
+        self.results = []
+        self.found_emails = set()
+        self.found_hashes = set()
+
+    def _should_visit(self, url):
+        parsed = urlparse(url)
+        return (
+            parsed.scheme in ("http", "https") and
+            self.domain in parsed.netloc and
+            url not in self.visited
+        )
+
+    def _parse_links(self, html, base_url):
+        soup = BeautifulSoup(html, 'html.parser')
+        links = set()
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            full_url = urljoin(base_url, href.split('#')[0])
+            if self._should_visit(full_url):
+                links.add(full_url)
+        return links
+
+    def _matches_keywords(self, content):
+        if not self.keyword_filters:
+            return True
+        return any(kw.lower() in content.lower() for kw in self.keyword_filters)
+
+    def _extract_emails_and_hashes(self, text):
+        emails = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', text)
+        hashes = re.findall(r'\b[a-fA-F0-9]{32,64}\b', text)
+        self.found_emails.update(emails)
+        self.found_hashes.update(hashes)
+
+    async def _fetch(self, session, url, depth):
+        if depth > self.depth or url in self.visited:
+            return
+
+        self.visited.add(url)
+        await asyncio.sleep(self.delay)
+
+        try:
+            async with session.get(url) as response:
+                if response.status != 200:
+                    return
+
+                text = await response.text(errors='ignore')
+                soup = BeautifulSoup(text, 'html.parser')
+                title = soup.title.string.strip() if soup.title else "(No title)"
+
+                content = title + ' ' + url
+                if self._matches_keywords(content):
+                    self.results.append({"url": url, "title": title})
+
+                if self.extract_data:
+                    self._extract_emails_and_hashes(text)
+
+                links = self._parse_links(text, url)
+                await asyncio.gather(*[
+                    self._fetch(session, link, depth + 1) for link in links
+                ])
+
+        except Exception:
+            pass  # Silence connection or parse errors
+
+    async def run(self):
+        print(f"\n🌐 [Spider] Crawling {self.base_url} (depth={self.depth}){' via Tor' if self.use_tor else ''}...\n")
+        timeout = ClientTimeout(total=30)
+
+        connector = None
+        if self.use_tor:
+            connector = ProxyConnector.from_url('socks5h://127.0.0.1:9052')
+
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
+            await self._fetch(session, self.base_url, 0)
+
+        print(f"\n✅ [Spider] Done. {len(self.results)} results.")
+        for r in self.results:
+            print(f" • {r['title']} — {r['url']}")
+
+        if self.found_emails:
+            print(f"\n📧 Emails found ({len(self.found_emails)}):")
+            for e in sorted(self.found_emails):
+                print(f"   - {e}")
+
+        if self.found_hashes:
+            print(f"\n🔐 Hashes found ({len(self.found_hashes)}):")
+            for h in sorted(self.found_hashes):
+                print(f"   - {h}")
+
+        return self.results
+
 class PegasusMonitor:
     def __init__(self):
         self.ioc_domains = [
@@ -1830,9 +1932,10 @@ def print_help():
             ("dnsleak",               "Run a dnsleak test"),
             ("analyze! <url>",        "Analyze a URL for threat trackers"),
             ("open <url>",            "Open and fetch a full URL (tracker-safe)"),
-            ("emailintel",            "Lookup MX Information"),
-            ("emailhunt",             "Collect Information"),
-            ("pegasusmonitor",        "Run Pegasus Infection Check")
+            ("emailintel <email>",    "Lookup MX Information"),
+            ("emailhunt <email>",     "Collect Information"),
+            ("pegasusmonitor",        "Run Pegasus Infection Check"),
+            ("spider <url>",          "Crawl & Extract information")
         ]),
 
         ("Tools and Utilities", [
@@ -4180,6 +4283,27 @@ def repl_main():
                     osintscan(query)
                 except Exception as e:
                     console.print(f"[red]OSINT scan failed: {e}[/red]")
+                    
+            elif cmd.startswith("spider "):
+                parts = cmd.split()
+                if len(parts) >= 2:
+                    url = parts[1]
+                    use_tor = "--tor" in parts
+                    parts = [p for p in parts if p != "--tor"]
+
+                    try:
+                        depth = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else 2
+                    except ValueError:
+                        depth = 2
+
+                    filters_start = 3 if len(parts) >= 3 and parts[2].isdigit() else 2
+                    keyword_filters = parts[filters_start:] if len(parts) > filters_start else []
+
+                    print(f"🕷️ Launching spider on {url} (depth={depth}) with filters: {', '.join(keyword_filters) or 'None'} {'via Tor' if use_tor else ''}\n")
+                    spider = DarkelfSpiderAsync(base_url=url, depth=depth, keyword_filters=keyword_filters, use_tor=use_tor)
+                    asyncio.run(spider.run())
+                else:
+                    print("Usage: spider <url> [depth] [keywords...] [--tor]")
 
             elif cmd.startswith("search "):
                 q = cmd.split(" ", 1)[1]
@@ -4286,4 +4410,3 @@ if __name__ == "__main__":
     # Step 5: In-memory log cleanup
     for category in pq_logger.logs:
         pq_logger.logs[category].clear()
-
