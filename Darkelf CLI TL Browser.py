@@ -182,7 +182,7 @@ class DarkelfSpiderAsync:
         self.found_hashes.update(hashes)
 
     def _extract_names(self, text):
-        # Match capitalized full names like "Kevin Moore"
+        # Match capitalized full names like "John Doe"
         possible_names = re.findall(r'\b[A-Z][a-z]+ [A-Z][a-z]+\b', text)
 
         # Blacklist junk marketing phrases and UI elements
