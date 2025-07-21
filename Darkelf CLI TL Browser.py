@@ -131,9 +131,9 @@ def get_tor_session():
         "https": "socks5h://127.0.0.1:9052",
     }
     return session
-    
+
 class DarkelfSpiderAsync:
-    def __init__(self, base_url, depth=2, delay=1.5, keyword_filters=None, extract_data=True, use_tor=False):
+    def __init__(self, base_url, depth=3, delay=1.5, keyword_filters=None, extract_data=True, use_tor=False):
         self.base_url = base_url.rstrip('/')
         self.domain = urlparse(base_url).netloc
         self.depth = depth
@@ -145,6 +145,8 @@ class DarkelfSpiderAsync:
         self.results = []
         self.found_emails = set()
         self.found_hashes = set()
+        self.found_usernames = set()
+        self.found_names = set()
 
     def _should_visit(self, url):
         parsed = urlparse(url)
@@ -172,8 +174,80 @@ class DarkelfSpiderAsync:
     def _extract_emails_and_hashes(self, text):
         emails = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', text)
         hashes = re.findall(r'\b[a-fA-F0-9]{32,64}\b', text)
+
+        if emails:
+            print(f"[DEBUG] Found emails: {emails}")
+
         self.found_emails.update(emails)
         self.found_hashes.update(hashes)
+
+    def _extract_names(self, text):
+        # Match capitalized full names like "Kevin Moore"
+        possible_names = re.findall(r'\b[A-Z][a-z]+ [A-Z][a-z]+\b', text)
+
+        # Blacklist junk marketing phrases and UI elements
+        blacklist = {
+            "Learn More", "Developer Components", "Documentation Wiki",
+            "Hardened Networking", "Native Tor", "Quantum Editions",
+            "Ready Editions", "Threat Detection", "Updated Darkelf"
+        }
+
+        clean_names = [
+            name for name in possible_names
+            if name not in blacklist and all(part.istitle() for part in name.split())
+        ]
+
+        self.found_names.update(clean_names)
+
+    def _extract_usernames(self, text, soup):
+        """
+        Extracts potential usernames from:
+        - @handle-style text
+        - meta tags
+        - known social profile URLs (GitHub, Discord)
+        """
+
+        # CSS keywords that aren't usernames
+        css_keywords = {
+            "media", "keyframes", "font-face", "supports", "import", "charset",
+            "layer", "namespace", "document", "page"
+        }
+
+        # ---- 1. @handle-style text ----
+        handle_matches = re.findall(r'@([\w\-_]{2,32})', text)
+        cleaned_handles = {
+            h for h in handle_matches
+            if h.lower() not in css_keywords and not h[0].isdigit()
+        }
+
+        # ---- 2. Meta tag usernames ----
+        meta_usernames = set()
+        for tag in soup.find_all('meta'):
+            content = tag.get('content', '')
+            if content and re.fullmatch(r'[\w\-_]{3,32}', content):
+                if content.lower() not in css_keywords:
+                    meta_usernames.add(content)
+
+        # ---- 3. Usernames from social media URLs ----
+        link_usernames = set()
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+
+            github_match = re.search(r'github\.com/([\w\-_]{2,32})', href)
+            discord_match = re.search(r'discord(app)?\.com/users/([\w\-_]+)', href)
+
+            if github_match:
+                username = github_match.group(1)
+                if username.lower() not in css_keywords:
+                    link_usernames.add(username)
+
+            if discord_match:
+                username = discord_match.group(2)
+                link_usernames.add(username)
+
+        # Combine all sources
+        all_usernames = cleaned_handles | meta_usernames | link_usernames
+        self.found_usernames.update(all_usernames)
 
     async def _fetch(self, session, url, depth):
         if depth > self.depth or url in self.visited:
@@ -197,6 +271,8 @@ class DarkelfSpiderAsync:
 
                 if self.extract_data:
                     self._extract_emails_and_hashes(text)
+                    self._extract_names(text)
+                    self._extract_usernames(text, soup)
 
                 links = self._parse_links(text, url)
                 await asyncio.gather(*[
@@ -204,8 +280,8 @@ class DarkelfSpiderAsync:
                 ])
 
         except Exception:
-            pass  # Silence connection or parse errors
-
+            pass  # Fail silently on connection or parsing issues
+        
     async def run(self):
         print(f"\n🌐 [Spider] Crawling {self.base_url} (depth={self.depth}){' via Tor' if self.use_tor else ''}...\n")
         timeout = ClientTimeout(total=30)
@@ -230,6 +306,16 @@ class DarkelfSpiderAsync:
             print(f"\n🔐 Hashes found ({len(self.found_hashes)}):")
             for h in sorted(self.found_hashes):
                 print(f"   - {h}")
+
+        if self.found_usernames:
+            print(f"\n👤 Usernames found ({len(self.found_usernames)}):")
+            for u in sorted(self.found_usernames):
+                print(f"   - @{u}")
+
+        if self.found_names:
+            print(f"\n🧍 Personal Names found ({len(self.found_names)}):")
+            for n in sorted(self.found_names):
+                print(f"   - {n}")
 
         return self.results
 
