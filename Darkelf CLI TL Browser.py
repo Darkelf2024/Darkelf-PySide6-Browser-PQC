@@ -131,7 +131,7 @@ def get_tor_session():
         "https": "socks5h://127.0.0.1:9052",
     }
     return session
-
+    
 class DarkelfSpiderAsync:
     def __init__(self, base_url, depth=3, delay=1.5, keyword_filters=None, extract_data=True, use_tor=False):
         self.base_url = base_url.rstrip('/')
@@ -202,12 +202,11 @@ class DarkelfSpiderAsync:
     def _extract_usernames(self, text, soup):
         """
         Extracts potential usernames from:
-        - @handle-style text
-        - meta tags
-        - known social profile URLs (GitHub, Discord)
+        - @handle-style mentions
+        - <meta> tags
+        - URLs from known social platforms
         """
 
-        # CSS keywords that aren't usernames
         css_keywords = {
             "media", "keyframes", "font-face", "supports", "import", "charset",
             "layer", "namespace", "document", "page"
@@ -228,22 +227,32 @@ class DarkelfSpiderAsync:
                 if content.lower() not in css_keywords:
                     meta_usernames.add(content)
 
-        # ---- 3. Usernames from social media URLs ----
+        # ---- 3. Social media URLs ----
+        social_patterns = {
+            "github": r'github\.com/([\w\-_]{2,32})',
+            "discord": r'discord(app)?\.com/users/([\w\-_]+)',
+            "tiktok": r'tiktok\.com/@([\w\._\-]+)',
+            "twitter": r'(?:twitter|x)\.com/([A-Za-z0-9_]{1,15})',
+            "facebook": r'facebook\.com/([A-Za-z0-9.\-]+)',
+            "instagram": r'instagram\.com/([A-Za-z0-9_.]+)',
+            "reddit": r'reddit\.com/user/([A-Za-z0-9_\-]+)',
+            "linkedin": r'linkedin\.com/in/([A-Za-z0-9\-_]+)',
+            "youtube_user": r'youtube\.com/user/([A-Za-z0-9_\-]+)',
+            "youtube_channel": r'youtube\.com/channel/([A-Za-z0-9_\-]+)',
+            "medium": r'medium\.com/@([A-Za-z0-9_\-]+)',
+            "pinterest": r'pinterest\.com/([A-Za-z0-9_\-/]+)'
+        }
+
         link_usernames = set()
         for a in soup.find_all('a', href=True):
             href = a['href']
-
-            github_match = re.search(r'github\.com/([\w\-_]{2,32})', href)
-            discord_match = re.search(r'discord(app)?\.com/users/([\w\-_]+)', href)
-
-            if github_match:
-                username = github_match.group(1)
-                if username.lower() not in css_keywords:
-                    link_usernames.add(username)
-
-            if discord_match:
-                username = discord_match.group(2)
-                link_usernames.add(username)
+            for platform, pattern in social_patterns.items():
+                match = re.search(pattern, href)
+                if match:
+                    # Capture group handling
+                    username = match.group(1)
+                    if username and username.lower() not in css_keywords:
+                        link_usernames.add(username)
 
         # Combine all sources
         all_usernames = cleaned_handles | meta_usernames | link_usernames
