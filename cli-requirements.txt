@@ -25,4 +25,4 @@ rich==14.0.0
 stem==1.8.2
 tls-client==1.0.1
 # pip install -r cli-requirements.txt
-# pip install liboqs-python 0.12.0 rename to 0.13.0 if liboqs 13 iws installed
+# pip install liboqs-python 0.12.0 rename to 0.13.0 if liboqs 13 is installed
