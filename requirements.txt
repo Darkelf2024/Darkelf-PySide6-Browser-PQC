@@ -14,22 +14,18 @@ PySocks==1.7.1
 PyQt5-WebEngine==5.15
 requests==2.32.4
 scikit-learn==1.6.1
-stem==1.8.2
 shiboken6==6.9.1
 requests==2.32.4
 matplotlib==3.10.3
 pynacl==1.5.0
 psutil==7.0.0
 httpx==0.28.1
+aiohttp==3.12.14
+aiohttp_socks==0.10.1
+beautifulsoup4==4.13.4
+requests==2.32.4
+stem==1.8.2
 tls-client==1.0.1
-aiohttp
-aiohttp_socks
-beautifulsoup4
-phonenumbers
-rich
 
 # Install the Python wrapper that matches your native liboqs version
 pip install liboqs-python==0.12.0  # or rename liboqs-python version to 0.13.0 with nano pyproject.toml - your liboqs-python location only if you install liboqs 0.13.0
-
-
-# These will be updated soon
