@@ -87,7 +87,6 @@ import ctypes.util
 from nacl.public import PrivateKey, PublicKey
 from nacl.exceptions import CryptoError
 from typing import Optional, List, Dict
-from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 from base64 import urlsafe_b64encode, urlsafe_b64decode
 from collections import defaultdict
@@ -127,10 +126,14 @@ from stem.control import Controller
 from stem import Signal as StemSignal
 from stem import process as stem_process
 
+
+from urllib.parse import quote_plus
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 # PyQt5 Imports
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QPushButton, QLineEdit, QVBoxLayout,
-    QMenuBar, QToolBar, QDialog, QMessageBox, QFileDialog, QProgressDialog,
+    QMenuBar, QToolBar, QDialog, QMessageBox, QFileDialog, QProgressDialog, QTextEdit,
     QListWidget, QMenu, QWidget, QLabel, QShortcut, QAction, QActionGroup
 )
 from PyQt5.QtGui import QPalette, QColor, QKeySequence, QGuiApplication
@@ -150,70 +153,302 @@ from PyQt5.QtCore import (
     pyqtSignal, QThread
 )
 
-# This is placed here - I will be integrating the second phase later this week plugging into Darkelf Class: I am running tests getting it production ready!
-class DarkelfMessenger:
-    def __init__(self):
-        self.kem_algo = "ML-KEM-768"
+class SignalWrapper(QObject):
+    osint_result_signal = pyqtSignal(object)
+    
+class EmailIntelPro:
+    def __init__(self, email, session=None):
+        self.email = email
+        self.session = session or requests.Session()
+        self.domain = email.split("@")[-1] if "@" in email else ""
+        self.prefix = email.split("@")[0] if "@" in email else ""
+        self.mx_records = []
+        self.txt_records = []
+        self.creation_date = None
+        self.disposable = False
+        self.score = 0
+        self.breached = False
 
-    def generate_keys(self):
-        kem = KeyEncapsulation(self.kem_algo)
-        pub = kem.generate_keypair()
-        with open("my_pubkey.bin", "wb") as f:
-            f.write(pub)
-        with open("my_privkey.bin", "wb") as f:
-            f.write(kem.export_secret_key())
-        print("🔐 Keys created: my_pubkey.bin / my_privkey.bin")
+    def is_valid_email(self):
+        return bool(re.match(r"^[^@]+@[^@]+\.[^@]+$", self.email))
 
-    def send_message(self, recipient_pubkey_path, message_text, output_path="msg.dat"):
-        kem = KeyEncapsulation(self.kem_algo)
-        with open(recipient_pubkey_path, "rb") as f:
-            pubkey = f.read()
-        ciphertext, shared_secret = kem.encap_secret(pubkey)
-        key = base64.urlsafe_b64encode(shared_secret[:32])
-        token = Fernet(key).encrypt(message_text.encode())
-        with open(output_path, "wb") as f:
-            f.write(ciphertext + b'||' + token)
-        print("📤 Message encrypted →", output_path)
-
-    def receive_message(self, my_privkey_path="my_privkey.bin", msg_path="msg.dat"):
-        kem = KeyEncapsulation(self.kem_algo)
-        with open(my_privkey_path, "rb") as f:
-            kem.import_secret_key(f.read())
-        with open(msg_path, "rb") as f:
-            ciphertext, token = f.read().split(b'||')
-        shared_secret = kem.decap_secret(ciphertext)
-        key = base64.urlsafe_b64encode(shared_secret[:32])
-        message = Fernet(key).decrypt(token)
-        print("📥 Message decrypted →", message.decode())
-        return message.decode()
-
-    def deliver_over_tor(self, onion_url="http://exampleonion/upload", msg_path="msg.dat"):
+    async def analyze(self):
+        # Dummy: Add real DNS and breach checks here
         try:
-            proxies = {
-                'http': 'socks5h://127.0.0.1:9052',
-                'https': 'socks5h://127.0.0.1:9052',
-            }
-            with open(msg_path, "rb") as f:
-                files = {'file': f}
-                r = requests.post(onion_url, files=files, proxies=proxies, timeout=15)
-                print("🚀 Sent via Tor:", r.status_code)
+            self.mx_records = ["mx1." + self.domain]
+            self.txt_records = ["v=spf1 include:" + self.domain]
+            self.creation_date = "2022-01-01"
+            self.disposable = "mailinator" in self.domain
+            self.score = 100 if not self.disposable else 60
+            self.breached = False
         except Exception as e:
-            print("❌ Tor delivery failed:", e)
+            print(f"Initialization failed: {e}")
 
-def start_message_watcher():
-    def watch():
-        messenger = DarkelfMessenger()
-        while True:
-            if os.path.exists("msg.dat"):
-                try:
-                    msg = messenger.receive_message()
-                    print("📨 [Auto Received]:", msg)
-                    os.remove("msg.dat")
-                except Exception as e:
-                    print("⚠️ Message receive failed:", e)
-            time.sleep(5)
+# Placeholder imports (you should define or replace these)
+# from email_intel_pro import EmailIntelPro
+# from some_module import get_tor_session
 
-    threading.Thread(target=watch, daemon=True).start()
+
+class DarkelfUtils:
+    DUCKDUCKGO_LITE = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
+    DUCKDUCKGO_HTML = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/html"
+    TOR_PROXY = {
+        "http": "socks5h://127.0.0.1:9052",
+        "https": "socks5h://127.0.0.1:9052"
+    }
+    DORK_THREADS = 2
+    FETCH_THREADS = 2
+
+    def __init__(self):
+        pass
+
+    def generate_duckduckgo_dorks(self, query):
+        dorks = []
+        if "@" in query:
+            dorks += [
+                f'"{query}" site:pastebin.com',
+                f'"{query}" site:github.com',
+                f'"{query}" filetype:txt',
+                f'"{query}" site:linkedin.com/in',
+                f'"{query}" site:facebook.com',
+                f'"{query}" intitle:index.of',
+                f'"{query}" ext:log OR ext:txt',
+                f'"{query}" site:medium.com',
+                f'"{query}" site:archive.org',
+            ]
+        elif query.startswith("+") or query.replace(" ", "").isdigit():
+            dorks += [
+                f'"{query}" site:pastebin.com',
+                f'"{query}" filetype:pdf',
+                f'"{query}" site:whocallsme.com',
+                f'"{query}" intitle:index.of',
+                f'"{query}" ext:log OR ext:txt',
+            ]
+        elif "." in query:
+            dorks += [
+                f'site:{query} ext:log',
+                f'site:{query} ext:txt',
+                f'"@{query}"',
+                f'"{query}" intitle:index.of',
+                f'"{query}" filetype:csv',
+                f'"{query}" site:archive.org',
+            ]
+        else:
+            dorks += [
+                f'"{query}" site:github.com',
+                f'"{query}" site:reddit.com',
+                f'"{query}" site:twitter.com',
+                f'"{query}" site:medium.com',
+                f'"{query}" inurl:profile',
+                f'"{query}" intitle:profile',
+                f'"{query}" filetype:pdf',
+                f'"{query}" site:pastebin.com',
+                f'"{query}" ext:log OR ext:txt',
+            ]
+        return dorks
+
+    def parse_ddg_lite_results(self, soup):
+        results = []
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            text = a.get_text(strip=True)
+            if href.startswith("http") and "google.com" not in href.lower():
+                results.append((text or "[no snippet]", href))
+        return results if results else "no_results"
+
+    def onion_ddg_search(self, query, max_results=10, use_tor=True):
+        session = requests.Session()
+        if use_tor:
+            session.proxies = self.TOR_PROXY
+        headers = {"User-Agent": "Mozilla/5.0"}
+
+        endpoints = [self.DUCKDUCKGO_LITE, self.DUCKDUCKGO_HTML]
+        random.shuffle(endpoints)
+        for endpoint in endpoints:
+            try:
+                if endpoint.endswith("/html"):
+                    res = session.post(endpoint, headers=headers, data={"q": query}, timeout=10)
+                else:
+                    res = session.get(f"{endpoint}?q={quote_plus(query)}", headers=headers, timeout=10)
+                soup = BeautifulSoup(res.text, "html.parser")
+                results = self.parse_ddg_lite_results(soup)
+                if results and results != "no_results":
+                    return results[:max_results]
+            except Exception:
+                continue
+        return []
+
+    def run_dork_searches(self, dorks: list, max_results=10):
+        results = {}
+        failed_dorks = []
+        seen_urls = set()
+
+        category_colors = {
+            "github.com": "green",
+            "reddit.com": "red",
+            "twitter.com": "blue",
+            "medium.com": "magenta",
+            "pastebin.com": "yellow",
+            "linkedin.com": "bright_cyan",
+            "facebook.com": "bright_blue",
+            "inurl:profile": "cyan",
+            "intitle:profile": "bright_magenta",
+            "filetype:pdf": "bright_yellow",
+            "ext:log": "bright_red",
+            "ext:txt": "bright_red",
+        }
+
+        def worker(dork):
+            try:
+                hits = self.onion_ddg_search(dork, max_results=max_results)
+                urls = [url for _, url in hits if url not in seen_urls] if hits else []
+                return dork, urls
+            except Exception:
+                return dork, []
+
+        with ThreadPoolExecutor(max_workers=self.DORK_THREADS) as executor:
+            future_to_dork = {executor.submit(worker, dork): dork for dork in dorks}
+            for future in as_completed(future_to_dork):
+                dork, urls = future.result()
+                if urls:
+                    for url in urls:
+                        seen_urls.add(url)
+                    color = next((v for k, v in category_colors.items() if k in dork), "white")
+                    results[dork] = urls[:max_results]
+                else:
+                    failed_dorks.append(dork)
+
+        return results
+
+    def fetch_url(self, url, use_tor=True, timeout=15):
+        session = requests.Session()
+        if use_tor:
+            session.proxies = self.TOR_PROXY
+        res = session.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
+        return res.text
+
+    def fetch_urls_parallel(self, urls, use_tor=True, timeout=10):
+        def worker(url):
+            try:
+                return url, self.fetch_url(url, use_tor=use_tor, timeout=timeout)
+            except Exception:
+                return url, None
+
+        results = {}
+        with ThreadPoolExecutor(max_workers=self.FETCH_THREADS) as executor:
+            future_to_url = {executor.submit(worker, url): url for url in urls}
+            for future in as_completed(future_to_url):
+                url, content = future.result()
+                results[url] = content
+        return results
+
+    @staticmethod
+    def save_osint_data_to_json(data: dict, output_path: str = "osint_scrape_output.json"):
+        try:
+            with open(output_path, "r") as infile:
+                existing = json.load(infile)
+        except (FileNotFoundError, json.JSONDecodeError):
+            existing = []
+        existing.append(data)
+        with open(output_path, "w") as outfile:
+            json.dump(existing, outfile, indent=4)
+
+    def osintscan(self, query, use_tor=True, max_results=10):
+        import re
+        is_email = bool(re.match(r"^[^@]+@[^@]+\.[^@]+$", query))
+        is_username = bool(re.match(r"^@?[a-zA-Z0-9_.-]{3,32}$", query)) and not is_email
+        is_name = False
+
+        if not (is_email or is_username):
+            parts = query.strip().split()
+            if len(parts) >= 2 and all(re.match(r"^[A-Za-z.\-']+$", p) for p in parts):
+                is_name = True
+
+        username = query.lstrip('@') if is_username else None
+        email = query if is_email else None
+        name = query if is_name else None
+
+        results = {
+            "emails": [],
+            "profiles": [],
+            "mentions": [],
+            "summary": []
+        }
+
+        tlds = ["com", "net", "org", "gov", "edu", "int", "info", "eu", "ch", "de", "fr", "it", "nl", "ru", "pl", "us", "uk", "au", "ca", "in", "biz", "pro", "co", "me"]
+        special_sites = ["archive.org", "pastebin.com", "manchestercf.com", "egs.edu", "researchgate.net", "academia.edu", "ssrn.com", "osf.io", "darkelfbrowser.com"]
+
+        if is_email:
+            username_part = email.split("@")[0]
+            dorks_email = [f'"{email}" site:{site}' for site in special_sites]
+            dorks_email += [f'"{email}" site:.{tld}' for tld in tlds]
+            dorks_email += [
+                f'"{email}"',
+                f'"{email}" ext:log OR ext:txt',
+                f'"{email}" filetype:pdf',
+                f'"{email}" inurl:profile',
+                f'"{email}" inurl:user',
+                f'"{email}" intitle:profile'
+            ]
+            dorks_username = [f'"{username_part}" site:{site}' for site in special_sites]
+            dorks_username += [f'"{username_part}" site:.{tld}' for tld in tlds]
+            dorks_username += [
+                f'"{username_part}"',
+                f'"{username_part}" ext:log OR ext:txt',
+                f'"{username_part}" inurl:profile',
+                f'"{username_part}" site:github.com',
+                f'"{username_part}" site:linkedin.com/in',
+                f'"{username_part}" site:reddit.com/user'
+            ]
+            dorks = dorks_email + dorks_username
+        elif is_username:
+            dorks = [
+                f'"{username}" inurl:profile',
+                f'"{username}" site:github.com',
+                f'"{username}" site:reddit.com/user',
+                f'"{username}" site:stackoverflow.com/users',
+                f'"{username}" site:about.me'
+            ]
+        elif is_name:
+            dorks = [f'"{name}" site:{site}' for site in special_sites]
+            dorks += [f'"{name}" site:.{tld}' for tld in tlds]
+        else:
+            dorks = [f'"{query}"']
+
+        seen = set()
+        urls = []
+
+        for dork in dorks:
+            hits = self.onion_ddg_search(dork, max_results=max_results)
+            for item in hits:
+                url = item[1] if isinstance(item, (list, tuple)) and len(item) == 2 else str(item)
+                if url.startswith("http") and url not in seen:
+                    urls.append(url)
+                    seen.add(url)
+            if len(urls) >= max_results:
+                break
+
+        results["profiles"].extend(urls)
+        results["mentions"].extend(list(seen))
+
+        summary = []
+        summary.append("=== OSINT Summary ===")
+        if email:
+            summary.append(f"[📧] Email scanned: {email}")
+        if username:
+            summary.append(f"[🧑] Username scanned: {username}")
+        if name:
+            summary.append(f"[👤] Name scanned: {name}")
+        if urls:
+            summary.append(f"[🌐] Dorked URLs: {len(urls)}")
+            for u in urls[:max_results]:
+                summary.append(f"  - {u}")
+        else:
+            summary.append("[!] No URLs found.")
+        summary.append("✅ OSINT scan complete.")
+        results["summary"] = summary
+
+        return results
 
 class DarkelfKernelMonitor(threading.Thread):
     """
@@ -222,14 +457,14 @@ class DarkelfKernelMonitor(threading.Thread):
     """
 
     def __init__(self, check_interval=5, parent_app=None):
-        super().__init__(daemon=True)
-        self.check_interval = check_interval
-        self.parent_app = parent_app
-        self.initial_fingerprint = self.system_fingerprint()
-        self._last_swap_active = None
-        self._last_pager_state = None
-        self._last_fingerprint_hash = hash(str(self.initial_fingerprint))
-        self.cleanup_required = False
+            super().__init__(daemon=True)
+            self.check_interval = check_interval
+            self.parent_app = parent_app
+            self.initial_fingerprint = self.system_fingerprint()
+            self._last_swap_active = None
+            self._last_pager_state = None
+            self._last_fingerprint_hash = hash(str(self.initial_fingerprint))
+            self.cleanup_required = False
 
     def run(self):
         while True:
@@ -467,6 +702,7 @@ class DarkelfTLSMonitorJA3:
         print("[DarkelfAI] 🛑 TLS Monitor stopped.")
         
 # 🔐 SecureBuffer + 🧠 MemoryMonitor (Embedded for Darkelf Browser)
+
 class SecureBuffer:
     def __init__(self, size=4096):
         self.size = size
@@ -524,7 +760,7 @@ class SecureBuffer:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-
+        
 class MemoryMonitor(threading.Thread):
     """
     Monitors system memory. If available memory falls below threshold,
@@ -3368,6 +3604,7 @@ class Darkelf(QMainWindow):
         self.setWindowTitle("Darkelf Browser")
         self.showMaximized()
         self.monitor_timer = None
+        self.signals = SignalWrapper()
         
         # --- Synchronous ML-KEM 768 key manager ---
         self.kyber_manager = MLKEM768Manager(sync=False)
@@ -3410,6 +3647,19 @@ class Darkelf(QMainWindow):
         else:
             self.log_stealth("Tor active — fallback not triggered")
             
+    def close_tab(self, index=None):
+        """
+        Closes the tab at the specified index. If no index is given, closes current tab.
+        """
+        if index is None:
+            index = self.tab_widget.currentIndex()
+        if self.tab_widget.count() < 2:
+            return
+        widget = self.tab_widget.widget(index)
+        widget.deleteLater()
+        self.tab_widget.removeTab(index)
+        self.clear_cache_and_history()
+        
     def start_mitmproxy_proxy(self):
         try:
             self.log_stealth("Starting mitmproxy with JA3 rotation...")
@@ -4278,154 +4528,93 @@ class Darkelf(QMainWindow):
         self.create_new_tab(url)
 
     def add_osint_actions(self, osint_menu):
-        scan_action = QAction("Run OSINT Scan", self)
-        scan_action.triggered.connect(self.launch_osint_crawler_ui)
-        osint_menu.addAction(scan_action)
+        run_osint_action = QAction("Run OSINT Scan", self)
+        run_osint_action.triggered.connect(self.launch_osint_scanner)  # ✅ must match your actual method name
+        osint_menu.addAction(run_osint_action)
 
-    def launch_osint_crawler_ui(self):
-        from PySide6.QtWidgets import QMenu
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Darkelf OSINT Scanner")
+    def launch_osint_scanner(self):
+        self.osint_window = QWidget()
+        self.osint_window.setWindowTitle("Darkelf OSINT Scanner")
+        self.osint_window.setGeometry(300, 200, 600, 500)
+
         layout = QVBoxLayout()
 
-        input_label = QLabel("Enter keyword (username, email, IP, etc):")
-        self.osint_input = QLineEdit()
-        layout.addWidget(input_label)
-        layout.addWidget(self.osint_input)
+        self.query_input = QLineEdit()
+        self.query_input.setPlaceholderText("Enter email, username, phone, or .onion")
 
-        scan_button = QPushButton("Scan via Tor")
-        scan_button.clicked.connect(self.run_osint_scan)
-        layout.addWidget(scan_button)
+        self.scan_button = QPushButton("Run OSINT Scan")
+        self.export_button = QPushButton("Export Results")
+        self.output_box = QTextEdit()
+        self.output_box.setReadOnly(True)
 
-        export_button = QPushButton("Export Results")
-        export_button.clicked.connect(self.export_osint_results)
-        layout.addWidget(export_button)
+        layout.addWidget(self.query_input)
+        layout.addWidget(self.scan_button)
+        layout.addWidget(self.export_button)
+        layout.addWidget(self.output_box)
 
-        self.results_list = QListWidget()
-        self.results_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.results_list.customContextMenuRequested.connect(self.show_osint_context_menu)
-        self.results_list.itemDoubleClicked.connect(self.open_result_link)
-        layout.addWidget(self.results_list)
+        self.osint_window.setLayout(layout)
+        self.scan_button.clicked.connect(self.run_osint_query)
+        self.export_button.clicked.connect(self.export_results)
 
-        dialog.setLayout(layout)
-        dialog.resize(600, 400)
-        dialog.exec()
+        self.last_result = None
+        self.osint_window.show()
 
-    def show_osint_context_menu(self, position):
-        menu = QMenu()
-        copy_action = menu.addAction("Copy")
-        action = menu.exec(self.results_list.mapToGlobal(position))
-        if action == copy_action:
-            item = self.results_list.currentItem()
-            if item:
-                QGuiApplication.clipboard().setText(item.text())
-
-    def open_result_link(self, item):
-        import webbrowser
-        text = item.text()
-        match = re.search(r"https?://[\w\-./?=#%&]+", text)
-        if match:
-            url = match.group(0)
-            webbrowser.open(url)
-
-    def export_osint_results(self):
-        if not self.results_list.count():
-            QMessageBox.information(self, "No Results", "There are no results to export.")
+    def run_osint_query(self):
+        query = self.query_input.text().strip()
+        if not query:
+            QMessageBox.warning(self.osint_window, "Missing Input", "Enter a query to scan.")
             return
+
+        self.output_box.clear()
+        self.output_box.append(f"[INFO] Running OSINT scan for: {query}\n")
+
+        # Connect the signal once
         try:
-            export_path, _ = QFileDialog.getSaveFileName(self, "Save OSINT Results", "osint_results.txt")
-            if export_path:
-                with open(export_path, "w", encoding="utf-8") as f:
-                    for i in range(self.results_list.count()):
-                        f.write(self.results_list.item(i).text() + "\n")
-                QMessageBox.information(self, "Exported", f"Results saved to {export_path}")
-        except Exception as e:
-            QMessageBox.critical(self, "Export Error", str(e))
+            self.signals.osint_result_signal.disconnect()
+        except Exception:
+            pass
+        self.signals.osint_result_signal.connect(self.display_osint_result)
 
-    def run_osint_scan(self):
+        def threaded_task(query_copy):
+            try:
+                utils = DarkelfUtils()
+                result = utils.osintscan(query_copy, use_tor=True, max_results=10)
+                self.last_result = result
+                self.signals.osint_result_signal.emit(result)
+            except Exception as e:
+                self.last_result = None
+                self.signals.osint_result_signal.emit({"error": str(e)})
 
-        keyword = self.osint_input.text().strip()
-        if not keyword:
-            QMessageBox.warning(self, "Input Required", "Please enter a keyword to scan.")
+        threading.Thread(target=threaded_task, args=(query,), daemon=True).start()
+
+    def export_results(self):
+        if not self.last_result:
+            QMessageBox.information(self.osint_window, "Nothing to export", "Run a scan first.")
             return
 
-        self.results_list.clear()
-        self.results_list.addItem("[⏳] Searching via Tor...")
-
-        async def perform_search(term):
-            proxy_url = "socks5h://127.0.0.1:9052"
-            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:102.0) Gecko/20100101 Firefox/102.0"}
-            timeout = httpx.Timeout(30.0, connect=60.0)
-            results = []
-
+        path, _ = QFileDialog.getSaveFileName(
+            self.osint_window,
+            "Save OSINT Results",
+            "osint_results.json",
+            "JSON Files (*.json)"
+        )
+        if path:
             try:
-                transport = httpx.AsyncHTTPTransport(proxy=proxy_url)
-                async with httpx.AsyncClient(transport=transport, timeout=timeout, headers=headers) as client:
-
-                    # OnionLand (.onion replica)
-                    try:
-                        onionland = await client.get(f"https://onionland.io/?q={term}", follow_redirects=True)
-                        soup = BeautifulSoup(onionland.text, "html.parser")
-                        for result in soup.select(".result, li, a"):  # adjust selector per actual structure
-                            a_tag = result.find("a", href=True)
-                            if a_tag:
-                                url = a_tag["href"]
-                                title = a_tag.get_text(strip=True)
-                                results.append(f"[OnionLand] {title} → {url}")
-                        if not any("[OnionLand]" in r for r in results):
-                            results.append("[OnionLand] No results found.")
-                    except Exception as e:
-                        results.append(f"[OnionLand] Error: {type(e).__name__}: {e}")
-
-                    # Ahmia
-                    try:
-                        ahmia = await client.get(f"https://ahmia.fi/search/?q={term}", follow_redirects=True)
-                        soup = BeautifulSoup(ahmia.text, "html.parser")
-                        for result in soup.select(".result"):
-                            a_tag = result.find("a", href=True)
-                            if a_tag:
-                                url = a_tag['href']
-                                title = a_tag.get_text(strip=True)
-                                results.append(f"[Ahmia] {title} → {url}")
-                        if not any("[Ahmia]" in r for r in results):
-                            results.append("[Ahmia] No .onion results found.")
-                    except Exception as e:
-                        results.append(f"[Ahmia] Error: {e}")
-
-                    # IntelX placeholder
-                    try:
-                        intelx = await client.get(f"https://intelx.io/?s={term}", follow_redirects=True)
-                        if "intelx.io" in intelx.text:
-                            results.append("[IntelX] Page loaded — check manually for deep data")
-                        else:
-                            results.append("[IntelX] No match found")
-                    except Exception as e:
-                        results.append(f"[IntelX] Error: {e}")
-
+                with open(path, "w") as f:
+                    json.dump(self.last_result, f, indent=4)
+                QMessageBox.information(self.osint_window, "Export Successful", f"Saved to:\n{path}")
             except Exception as e:
-                results.append(f"[Tor Proxy] Error: {e}")
+                QMessageBox.critical(self.osint_window, "Export Failed", f"Error: {e}")
 
-            return results
+    def display_osint_result(self, result):
+        if "error" in result:
+            self.output_box.append(f"[ERROR] Scan failed: {result['error']}")
+            return
 
-        def run_async():
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                results = loop.run_until_complete(perform_search(keyword))
-                loop.close()
+        self.output_box.append("[✅] Scan complete.\n")
+        for line in result.get("summary", []):
+            self.output_box.append(str(line))
 
-                self.results_list.clear()
-                for entry in results:
-                    self.results_list.addItem(entry)
-
-            except Exception as e:
-                self.results_list.clear()
-                self.results_list.addItem(f"[Error] {e}")
-
-        import threading
-        threading.Thread(target=run_async, daemon=True).start()
-
-        
     def add_recon_actions(self, recon_menu):
         urls = [
             ("Ahmia", "http://juhanurmihxlp77nkq76byazcldy2hlmovfu2epvl5ankdibsot4csyd.onion/"),
@@ -4446,7 +4635,7 @@ class Darkelf(QMainWindow):
             action = QAction(name, self)
             action.triggered.connect(lambda checked, u=url: self.open_url(u))
             recon_menu.addAction(action)
-
+            
     def add_tools_actions(self, tools_menu):
 
         urls = [
@@ -4575,8 +4764,10 @@ class Darkelf(QMainWindow):
         self.clear_cache_and_history()
 
     def go_back(self):
-        if self.tab_widget.currentWidget():
-            self.tab_widget.currentWidget().back()
+        """Navigate back in the current tab."""
+        current_webview = self.tab_widget.currentWidget()
+        if hasattr(current_webview, "back"):
+            current_webview.back()
 
     def go_forward(self):
         if self.tab_widget.currentWidget():
@@ -5004,25 +5195,28 @@ def main():
     )
 
     QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
-            
-    # Create the application
+
+    # Create the application only ONCE
     app = QApplication.instance() or QApplication(sys.argv)
-    
+
+    # Start the kernel monitor
     monitor = DarkelfKernelMonitor(parent_app=app)
     monitor.start()
-    
     app.aboutToQuit.connect(monitor.shutdown_darkelf)
-    
-    # Initialize and show the browser
+
+    # Start the main browser
     darkelf_browser = Darkelf()
     darkelf_browser.show()
-    
-    # Start TLS monitor after 10s delay to allow Tor to fully bootstrap
+
+    # Start TLS monitor after Tor bootstrap delay
     QTimer.singleShot(20000, start_tls_monitor)
-    
-    # Run the application
+
+    # Optionally: Launch the OSINT GUI in parallel (if desired)
+
+    # Start the event loop
     sys.exit(app.exec())
 
 if __name__ == '__main__':
     main()
+
 
