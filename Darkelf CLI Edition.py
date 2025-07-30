@@ -755,8 +755,9 @@ class TorManagerCLI:
                 return
 
             bridges = [
-               # "obfs4 185.177.207.158:8443 B9E39FA01A5C72F0774A840F91BC72C2860954E5 cert=WA1P+AQj7sAZV9terWaYV6ZmhBUcj89Ev8ropu/IED4OAtqFm7AdPHB168BPoW3RrN0NfA iat-mode=0",
-                "obfs4 91.227.77.152:465 42C5E354B0B9028667CFAB9705298F8C3623A4FB cert=JKS4que9Waw8PyJ0YRmx3QrSxv/YauS7HfxzmR51rCJ/M9jCKscJu7SOuz//dmzGJiMXdw iat-mode=2"
+                "obfs4 46.36.37.251:8443 58B51B6F4010DE58322752D0A9E437B4046B5023 cert=ivuqECFLPemiQ2aodQ7qnuXDpRqdOg6cTWStKAMxSVL5xhi3kKfE+ZGV5MtKCxy4URPHDg iat-mode=0"
+                "obfs4 193.138.81.106:8443 C94512A5874D9A1D5D1A7682A75DEB6D00430761 cert=KigNdR5llmRn1BF1ydeK3ZaI4ypBz2WjD5sH5//0ufav2RCv0Ue6VX/c4G76O9wyp3DyHw iat-mode=0" 
+
             ]
             random.shuffle(bridges)
 
