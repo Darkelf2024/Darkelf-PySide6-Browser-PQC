@@ -88,7 +88,7 @@ import dns.resolver
 import phonenumbers
 import textwrap
 import psutil
-from collections import deque
+from collections import deque, Counter
 from typing import Optional, List, Dict
 from datetime import datetime
 from aiohttp_socks import ProxyConnector
@@ -116,6 +116,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.markdown import Markdown
 from aiohttp import ClientTimeout
 import requests
+import spacy
 
 # --- Tor integration via Stem ---
 import stem.process
@@ -132,6 +133,25 @@ def get_tor_session():
     }
     return session
     
+async def async_fetch_ddg(query, max_results=5):
+    url = f"https://duckduckgo.com/html/?q={query}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=15) as response:
+                html = await response.text()
+                soup = BeautifulSoup(html, "html.parser")
+                hits = []
+                for a in soup.find_all("a", href=True):
+                    if a["href"].startswith("http"):
+                        hits.append((a.get_text(strip=True), a["href"]))
+                        if len(hits) >= max_results:
+                            break
+                return query, hits
+    except Exception as e:
+        return query, f"[Error fetching results: {e}]"
+
+nlp = spacy.load("en_core_web_sm")
+
 class DarkelfSpiderAsync:
     def __init__(self, base_url, depth=3, delay=1.5, keyword_filters=None, extract_data=True, use_tor=False):
         self.base_url = base_url.rstrip('/')
@@ -174,60 +194,40 @@ class DarkelfSpiderAsync:
     def _extract_emails_and_hashes(self, text):
         emails = re.findall(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', text)
         hashes = re.findall(r'\b[a-fA-F0-9]{32,64}\b', text)
-
         if emails:
             print(f"[DEBUG] Found emails: {emails}")
-
         self.found_emails.update(emails)
         self.found_hashes.update(hashes)
 
     def _extract_names(self, text):
-        # Match capitalized full names like "John Doe"
         possible_names = re.findall(r'\b[A-Z][a-z]+ [A-Z][a-z]+\b', text)
-
-        # Blacklist junk marketing phrases and UI elements
         blacklist = {
             "Learn More", "Developer Components", "Documentation Wiki",
             "Hardened Networking", "Native Tor", "Quantum Editions",
             "Ready Editions", "Threat Detection", "Updated Darkelf"
         }
-
         clean_names = [
             name for name in possible_names
             if name not in blacklist and all(part.istitle() for part in name.split())
         ]
-
         self.found_names.update(clean_names)
 
     def _extract_usernames(self, text, soup):
-        """
-        Extracts potential usernames from:
-        - @handle-style mentions
-        - <meta> tags
-        - URLs from known social platforms
-        """
-
         css_keywords = {
             "media", "keyframes", "font-face", "supports", "import", "charset",
             "layer", "namespace", "document", "page"
         }
-
-        # ---- 1. @handle-style text ----
         handle_matches = re.findall(r'@([\w\-_]{2,32})', text)
         cleaned_handles = {
             h for h in handle_matches
             if h.lower() not in css_keywords and not h[0].isdigit()
         }
-
-        # ---- 2. Meta tag usernames ----
         meta_usernames = set()
         for tag in soup.find_all('meta'):
             content = tag.get('content', '')
             if content and re.fullmatch(r'[\w\-_]{3,32}', content):
                 if content.lower() not in css_keywords:
                     meta_usernames.add(content)
-
-        # ---- 3. Social media URLs ----
         social_patterns = {
             "github": r'github\.com/([\w\-_]{2,32})',
             "discord": r'discord(app)?\.com/users/([\w\-_]+)',
@@ -242,91 +242,146 @@ class DarkelfSpiderAsync:
             "medium": r'medium\.com/@([A-Za-z0-9_\-]+)',
             "pinterest": r'pinterest\.com/([A-Za-z0-9_\-/]+)'
         }
-
         link_usernames = set()
         for a in soup.find_all('a', href=True):
             href = a['href']
             for platform, pattern in social_patterns.items():
                 match = re.search(pattern, href)
                 if match:
-                    # Capture group handling
                     username = match.group(1)
                     if username and username.lower() not in css_keywords:
                         link_usernames.add(username)
-
-        # Combine all sources
         all_usernames = cleaned_handles | meta_usernames | link_usernames
         self.found_usernames.update(all_usernames)
 
     async def _fetch(self, session, url, depth):
         if depth > self.depth or url in self.visited:
             return
-
         self.visited.add(url)
         await asyncio.sleep(self.delay)
-
         try:
             async with session.get(url) as response:
                 if response.status != 200:
                     return
-
                 text = await response.text(errors='ignore')
                 soup = BeautifulSoup(text, 'html.parser')
                 title = soup.title.string.strip() if soup.title else "(No title)"
-
                 content = title + ' ' + url
                 if self._matches_keywords(content):
                     self.results.append({"url": url, "title": title})
-
                 if self.extract_data:
                     self._extract_emails_and_hashes(text)
                     self._extract_names(text)
                     self._extract_usernames(text, soup)
-
                 links = self._parse_links(text, url)
                 await asyncio.gather(*[
                     self._fetch(session, link, depth + 1) for link in links
                 ])
-
         except Exception:
-            pass  # Fail silently on connection or parsing issues
-        
+            pass
+
     async def run(self):
         print(f"\n🌐 [Spider] Crawling {self.base_url} (depth={self.depth}){' via Tor' if self.use_tor else ''}...\n")
         timeout = ClientTimeout(total=30)
-
         connector = None
         if self.use_tor:
+            from aiohttp_socks import ProxyConnector
             connector = ProxyConnector.from_url('socks5h://127.0.0.1:9052')
-
         async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
             await self._fetch(session, self.base_url, 0)
-
         print(f"\n✅ [Spider] Done. {len(self.results)} results.")
         for r in self.results:
             print(f" • {r['title']} — {r['url']}")
-
         if self.found_emails:
             print(f"\n📧 Emails found ({len(self.found_emails)}):")
             for e in sorted(self.found_emails):
                 print(f"   - {e}")
-
         if self.found_hashes:
             print(f"\n🔐 Hashes found ({len(self.found_hashes)}):")
             for h in sorted(self.found_hashes):
                 print(f"   - {h}")
-
         if self.found_usernames:
             print(f"\n👤 Usernames found ({len(self.found_usernames)}):")
             for u in sorted(self.found_usernames):
                 print(f"   - @{u}")
-
         if self.found_names:
             print(f"\n🧍 Personal Names found ({len(self.found_names)}):")
             for n in sorted(self.found_names):
                 print(f"   - {n}")
-
         return self.results
+
+    def spacy_summary(self):
+        """
+        Use spaCy to analyze indicators and provide a structured, paragraph-style OSINT summary.
+        """
+
+        # Gather indicator lists
+        emails = sorted(self.found_emails)
+        usernames = sorted(self.found_usernames)
+        hashes = sorted(self.found_hashes)
+        names = sorted(self.found_names)
+
+        # Load spaCy model
+        nlp = spacy.load("en_core_web_sm")
+
+        # Extract named entities from the names list
+        name_entities = []
+        entity_counter = Counter()
+        for name in names:
+            doc = nlp(name)
+            for ent in doc.ents:
+                if ent.label_ in ("PERSON", "ORG"):
+                    name_entities.append(f"{ent.label_}: {ent.text}")
+                    entity_counter[ent.label_] += 1
+
+        # Build the OSINT report
+        report = []
+        report.append("OSINT Summary Report:\n")
+
+        # --- Email Addresses ---
+        if emails:
+            report.append(f"📧 Identified {len(emails)} email address{'es' if len(emails) > 1 else ''}: {', '.join(emails)}.")
+            for email in emails:
+                if any(email.endswith(domain) for domain in (".pro", ".xyz", ".top", ".icu", ".live")):
+                    report.append(f"  - {email}: Uses a non-standard or niche TLD, often linked to disposable or privacy-focused services.")
+                elif email.endswith(".gov") or email.endswith(".edu"):
+                    report.append(f"  - {email}: Institutional domain suggests legitimacy and possible affiliation with government or education.")
+
+        # --- Usernames ---
+        if usernames:
+            report.append(f"👤 Detected {len(usernames)} username{'s' if len(usernames) > 1 else ''}: {', '.join(usernames)}.")
+            for u in usernames:
+                if "darkelf" in u.lower():
+                    report.append(f"  - Username '{u}' may be tied to pseudonymous or niche online activity (e.g., forums or cybersecurity).")
+                if "consult" in u.lower():
+                    report.append(f"  - Username '{u}' suggests potential link to a professional service or freelance identity.")
+
+        # --- Hashes ---
+        if hashes:
+            report.append(f"🔐 Found {len(hashes)} cryptographic hash{'es' if len(hashes) > 1 else ''} — could indicate leaked credentials, passwords, or API secrets.")
+
+        # --- Names ---
+        if names:
+            report.append(f"🧑 Extracted {len(names)} name{'s' if len(names) > 1 else ''}: {', '.join(names)}.")
+            if name_entities:
+                report.append(f"  - Named entity types detected via NLP: {', '.join(name_entities)}.")
+            if "Full Name" in names:
+                report.append("  - 'Full Name' field may indicate a primary author or account owner.")
+
+        # --- Contextual Inference ---
+        if emails or usernames:
+            if any("domain" in item for item in emails + usernames):
+                report.append("🔎 Affiliation with specific domain names detected; may indicate organizational or service-based origin.")
+
+        # --- Summary Assessment ---
+        report.append(
+            "\n✅ No immediate critical threats were identified in this scan.\n"
+            "⚠️ However, professional-grade email domains and uniquely identifying usernames are present.\n"
+            "🔍 Further OSINT techniques such as breach checks, WHOIS lookups, and forum scrapes are advised for deeper context.\n"
+            "📌 Use `osintscan` or similar tooling to expand intelligence around these indicators."
+        )
+
+        return "\n".join(report)
 
 class PegasusMonitor:
     def __init__(self):
@@ -1364,8 +1419,9 @@ class TorManagerCLI:
                 return
 
             bridges = [
-               # "obfs4 185.177.207.158:8443 B9E39FA01A5C72F0774A840F91BC72C2860954E5 cert=WA1P+AQj7sAZV9terWaYV6ZmhBUcj89Ev8ropu/IED4OAtqFm7AdPHB168BPoW3RrN0NfA iat-mode=0",
-                "obfs4 91.227.77.152:465 42C5E354B0B9028667CFAB9705298F8C3623A4FB cert=JKS4que9Waw8PyJ0YRmx3QrSxv/YauS7HfxzmR51rCJ/M9jCKscJu7SOuz//dmzGJiMXdw iat-mode=2"
+                "obfs4 46.36.37.251:8443 58B51B6F4010DE58322752D0A9E437B4046B5023 cert=ivuqECFLPemiQ2aodQ7qnuXDpRqdOg6cTWStKAMxSVL5xhi3kKfE+ZGV5MtKCxy4URPHDg iat-mode=0"
+                "obfs4 193.138.81.106:8443 C94512A5874D9A1D5D1A7682A75DEB6D00430761 cert=KigNdR5llmRn1BF1ydeK3ZaI4ypBz2WjD5sH5//0ufav2RCv0Ue6VX/c4G76O9wyp3DyHw iat-mode=0" 
+
             ]
             random.shuffle(bridges)
 
@@ -2517,6 +2573,28 @@ class Page:
                             break
         except Exception as e:
             self.error = str(e)
+
+def launch_browser_in_new_terminal():
+    system = platform.system()
+    script_path = os.path.abspath(__file__)
+
+    try:
+        if system == "Darwin":  # macOS
+            subprocess.Popen([
+                "osascript", "-e",
+                f'tell app "Terminal" to do script "python3 \\"{script_path}\\" --browser"'
+            ])
+        elif system == "Linux":
+            subprocess.Popen(["x-terminal-emulator", "-e", f"python3 '{script_path}' --browser"])
+        elif system == "Windows":
+            subprocess.Popen([
+                "cmd", "/c", "start", "cmd", "/k",
+                f"{sys.executable} {script_path} --browser"
+            ], shell=True)
+        else:
+            print("Unsupported OS for terminal launch.")
+    except Exception as e:
+        print(f"❌ Failed to launch browser in new terminal: {e}")
 
 class DarkelfCLIBrowser:
     def __init__(self):
@@ -4364,7 +4442,7 @@ def repl_main():
                 print()
 
             elif cmd == "browser":
-                DarkelfCLIBrowser().run()
+                launch_browser_in_new_terminal()
                 print()
 
             elif cmd == "stealth":
@@ -4397,9 +4475,12 @@ def repl_main():
                     print(f"🕷️ Launching spider on {url} (depth={depth}) with filters: {', '.join(keyword_filters) or 'None'} {'via Tor' if use_tor else ''}\n")
                     spider = DarkelfSpiderAsync(base_url=url, depth=depth, keyword_filters=keyword_filters, use_tor=use_tor)
                     asyncio.run(spider.run())
+                    # << ADD THIS LINE BELOW >>
+                    print("\n🔎 [spaCy] NLP summary of indicators:")
+                    print(spider.spacy_summary())
                 else:
                     print("Usage: spider <url> [depth] [keywords...] [--tor]")
-
+                    
             elif cmd.startswith("search "):
                 q = cmd.split(" ", 1)[1]
                 url = f"{DUCKDUCKGO_LITE}?q={quote_plus(q)}"
@@ -4483,6 +4564,11 @@ def repl_main():
     threading.Thread(target=decoy_traffic_thread, args=(extra_stealth_options,), daemon=True).start()
 
 if __name__ == "__main__":
+    # 🧠 Check if launched in browser mode
+    if "--browser" in sys.argv:
+        DarkelfCLIBrowser().run()
+        sys.exit(0)  # Exit cleanly after browser mode
+
     # Step 1: Ensure strong entropy
     ensure_strong_entropy()
 
