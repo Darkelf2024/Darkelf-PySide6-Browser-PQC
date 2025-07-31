@@ -117,6 +117,7 @@ from rich.markdown import Markdown
 from aiohttp import ClientTimeout
 import requests
 import spacy
+import pytesseract
 
 # --- Tor integration via Stem ---
 import stem.process
@@ -150,6 +151,347 @@ async def async_fetch_ddg(query, max_results=5):
     except Exception as e:
         return query, f"[Error fetching results: {e}]"
 
+console = Console()
+
+# Load SpaCy model globally for efficiency
+nlp = spacy.load("en_core_web_sm")
+
+class DarkelfGovernmentScanner:
+    """
+    International legal/court scanner.
+    Uses CourtListener (US), BAILII (UK/Commonwealth), AustLII (Australia), and can be extended.
+    Includes SpaCy NER summaries and rich table output.
+    """
+
+    COURTLISTENER_API_ENDPOINTS = {
+        "search": "https://www.courtlistener.com/api/rest/v4/search/",
+    }
+    BAILII_SEARCH_URL = "https://www.bailii.org/cgi-bin/lucy_search_1.cgi"
+    AUSTLII_SEARCH_URL = "http://www.austlii.edu.au/cgi-bin/sinosrch.cgi"
+
+    OUTCOME_KEYWORDS = [
+        "affirmed", "reversed", "vacated", "remanded", "denied", "granted",
+        "convicted", "acquitted", "dismissed", "upheld", "overturned", "petition denied"
+    ]
+
+    def __init__(self, max_results=10, use_tor=False, allow_direct_fallback=True, courtlistener_email=None):
+        self.results = []
+        self.max_results = max_results
+        self.use_tor = use_tor
+        self.allow_direct_fallback = allow_direct_fallback
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; rv:115.0) Gecko/20100101 Firefox/115.0",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://duckduckgo.com/",
+            "Accept": "application/json",
+        }
+        if courtlistener_email:
+            self.headers["User-Agent"] += f" {courtlistener_email}"
+        self.session = self.get_tor_session() if use_tor else requests.Session()
+        logging.basicConfig(level=logging.INFO)
+        self.logger = logging.getLogger("DarkelfGovernmentScanner")
+
+    @staticmethod
+    def get_tor_session():
+        session = requests.Session()
+        session.proxies = {
+            "http": "socks5h://127.0.0.1:9052",
+            "https": "socks5h://127.0.0.1:9052"
+        }
+        return session
+
+    @staticmethod
+    def is_probable_case_title(title):
+        return bool(title and len(title.strip()) > 0)
+
+    def _safe_get(self, url, params=None, headers=None, timeout=25, retries=2, backoff=2):
+        attempt = 0
+        while attempt <= retries:
+            try:
+                resp = self.session.get(url, params=params, headers=headers or self.headers, timeout=timeout)
+                resp.raise_for_status()
+                return resp
+            except Exception as e:
+                self.logger.warning(f"GET {url} failed (attempt {attempt+1}/{retries+1}): {e}")
+                time.sleep(backoff * (attempt + 1))
+                attempt += 1
+        if self.allow_direct_fallback and self.use_tor:
+            try:
+                self.logger.warning(f"Retrying {url} with direct connection (no Tor)...")
+                session = requests.Session()
+                resp = session.get(url, params=params, headers=headers or self.headers, timeout=timeout)
+                resp.raise_for_status()
+                return resp
+            except Exception as e:
+                self.logger.error(f"Direct fallback GET {url} failed: {e}")
+        raise RuntimeError(f"Failed to fetch {url} after {retries+1} attempts")
+
+    def search_courtlistener(self, query):
+        try:
+            url = self.COURTLISTENER_API_ENDPOINTS["search"]
+            params = {"q": query, "page_size": self.max_results}
+            resp = self._safe_get(url, params=params)
+            try:
+                data = resp.json()
+            except Exception as json_exc:
+                print("[ERROR] CourtListener API did NOT return JSON. Here is the raw response:")
+                print(resp.text[:1000])  # print first 1000 chars
+                raise
+
+            got_any = False
+            for result in data.get("results", []):
+                if not isinstance(result, dict):
+                    continue
+
+                title = result.get("caseName") or result.get("caseNameFull") or ""
+                court = result.get("court")
+                if isinstance(court, dict):
+                    court_name = court.get("name", "")
+                else:
+                    court_name = court or result.get("court_citation_string", "")
+                citations = result.get("citation") or result.get("citations") or ""
+                if isinstance(citations, list):
+                    citations = ", ".join(citations)
+                snippet = ""
+                opinions = result.get("opinions")
+                if isinstance(opinions, list) and opinions:
+                    snippet = opinions[0].get("snippet", "")
+
+                got_any = True
+                self.results.append({
+                    "source": "CourtListener",
+                    "case": title,
+                    "court": court_name,
+                    "date": result.get("dateFiled"),
+                    "status": result.get("status") or result.get("caseStatus"),
+                    "citations": citations,
+                    "docket_number": result.get("docketNumber"),
+                    "url": "https://www.courtlistener.com" + result.get("absolute_url", ""),
+                    "snippet": snippet,
+                })
+
+            if not got_any:
+                self.logger.info("[Fallback] No API results — scraping HTML instead.")
+                html_url = f"https://www.courtlistener.com/?q={requests.utils.quote(query)}"
+                html = self._safe_get(html_url).text
+                self.results.extend(self.parse_courtlistener_html(html)[:self.max_results])
+
+        except Exception as e:
+            self.logger.error(f"CourtListener error: {e}")
+
+    def search_bailii(self, query):
+        """Search BAILII (UK, Ireland, Commonwealth) for the query."""
+        try:
+            params = {
+                "query": query,
+                "method": "boolean",
+                "sort": "rank",
+                "mask_path": "",
+                "search": "all",
+                "show": str(self.max_results)
+            }
+            resp = self._safe_get(self.BAILII_SEARCH_URL, params=params, timeout=20)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            results = soup.find_all("li")
+            for li in results[:self.max_results]:
+                a = li.find("a", href=True)
+                if not a:
+                    continue
+                url = a["href"]
+                title = a.get_text()
+                snippet = li.get_text(separator=" ", strip=True)
+                self.results.append({
+                    "source": "BAILII",
+                    "case": title,
+                    "court": "",  # BAILII sometimes includes court in the title
+                    "date": "",   # Sometimes in snippet or title, parse with regex if needed
+                    "status": "",
+                    "citations": "",
+                    "docket_number": "",
+                    "url": url if url.startswith("http") else "https://www.bailii.org" + url,
+                    "snippet": snippet,
+                })
+        except Exception as e:
+            self.logger.error(f"BAILII error: {e}")
+
+    def search_austlii(self, query):
+        """Search AustLII (Australian Law) for the query."""
+        try:
+            params = {
+                "query": query,
+                "results": self.max_results,
+                "submit": "Search",
+            }
+            resp = self._safe_get(self.AUSTLII_SEARCH_URL, params=params, timeout=20)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            results = soup.find_all("li")
+            for li in results[:self.max_results]:
+                a = li.find("a", href=True)
+                if not a:
+                    continue
+                url = a["href"]
+                title = a.get_text()
+                snippet = li.get_text(separator=" ", strip=True)
+                self.results.append({
+                    "source": "AustLII",
+                    "case": title,
+                    "court": "",  # Could parse more from title/snippet
+                    "date": "",
+                    "status": "",
+                    "citations": "",
+                    "docket_number": "",
+                    "url": url if url.startswith("http") else "http://www.austlii.edu.au" + url,
+                    "snippet": snippet,
+                })
+        except Exception as e:
+            self.logger.error(f"AustLII error: {e}")
+
+    def parse_courtlistener_html(self, html):
+        # Placeholder for HTML fallback (not implemented)
+        return []
+
+    def run_all(self, query, sources=None):
+        """
+        sources: list of which sources to use. Default: all.
+        """
+        self.results.clear()
+        queries = list(set([
+            query,
+            query.lower().replace(" vs ", " v. "),
+            query.lower().replace(" v. ", " vs ")
+        ]))
+        sources = sources or ['courtlistener', 'bailii', 'austlii']
+        for q in queries:
+            if 'courtlistener' in sources:
+                self.search_courtlistener(q)
+            if 'bailii' in sources:
+                self.search_bailii(q)
+            if 'austlii' in sources:
+                self.search_austlii(q)
+        return self._summarize_results()
+
+    def detect_case_outcome(self, snippet):
+        snippet_lower = snippet.lower()
+        for word in self.OUTCOME_KEYWORDS:
+            if word in snippet_lower:
+                match = re.search(rf"\b({word})\b", snippet, re.I)
+                if match:
+                    context = snippet[max(0, match.start()-40):match.end()+40]
+                    return match.group(1).capitalize(), context.strip()
+                return word.capitalize(), None
+        return "Outcome not detected", None
+
+    def pretty_print_cases_rich(self, results, max_cases=10):
+        console = Console()
+        term_width = shutil.get_terminal_size((80, 20)).columns
+        url_max = max(24, min(56, term_width - 95))
+        table = Table(
+            title=f"Top {min(max_cases, len(results))} Legal Results",
+            show_lines=True,
+            border_style="green",
+            expand=True,
+        )
+        table.add_column("Source", style="cyan", min_width=7, max_width=10, no_wrap=True)
+        table.add_column("Case Name", style="bold green", min_width=20, max_width=32, overflow="fold", no_wrap=False)
+        table.add_column("Court", style="magenta", min_width=14, max_width=22, overflow="fold", no_wrap=False)
+        table.add_column("Date", style="yellow", min_width=10, max_width=12, overflow="fold", no_wrap=True)
+        table.add_column("Outcome", style="red", min_width=13, max_width=20, overflow="fold", no_wrap=True)
+        table.add_column("Parties", style="white", min_width=20, max_width=32, overflow="fold", no_wrap=False)
+        table.add_column(
+            "URL",
+            style="blue",
+            min_width=22,
+            max_width=url_max,
+            overflow="fold",
+            no_wrap=False
+        )
+
+        for r in results[:max_cases]:
+            outcome, _ = self.detect_case_outcome(r.get("snippet", ""))
+            parties = ', '.join(r.get('parties', [])) or "N/A"
+            url = r.get('url', '')
+            table.add_row(
+                r.get('source', '') or "—",
+                r.get('case', '') or "—",
+                r.get('court', '') or "—",
+                r.get('date', '') or "—",
+                outcome or "—",
+                parties,
+                url
+            )
+
+        console.print(table)
+
+    def _summarize_results(self):
+        summary = []
+        for r in self.results:
+            text = " ".join(str(val) for val in r.values() if val)
+            doc = nlp(text)
+            parties = [ent.text for ent in doc.ents if ent.label_ in ("PERSON", "ORG")]
+            dates = [ent.text for ent in doc.ents if ent.label_ == "DATE"]
+            summary.append({
+                **r,
+                "parties": sorted(set(parties)),
+                "dates": sorted(set(dates)),
+            })
+        return summary
+
+    def summarize_apa_report(self, results, max_cases=3):
+        """
+        Generate an APA-style paragraph summarizing the case outcomes.
+        """
+        if not results:
+            return "No court records were found for the given search term."
+        summaries = []
+        for i, r in enumerate(results[:max_cases], 1):
+            outcome, _ = self.detect_case_outcome(r.get('snippet', ''))
+            citation = f"{r.get('case', 'Unknown Case')} [{r.get('citations', 'No citation')}]"
+            parties = ', '.join(r.get('parties', [])) or "N/A"
+            summary = (
+                f"{i}. {citation}, {r.get('court', '')}, {r.get('date', '')}. "
+                f"Main parties: {parties}. "
+                f"Outcome: {outcome}. "
+                f"Summary: {r.get('snippet', '')[:150].replace(chr(10), ' ')}{'...' if len(r.get('snippet', '')) > 150 else ''} "
+                f"URL: {r.get('url', '')}"
+            )
+            summaries.append(summary)
+        return "\n".join(summaries)
+        
+    def _summarize_results(self):
+        summary = []
+        for r in self.results:
+            text = " ".join(str(val) for val in r.values() if val)
+            doc = nlp(text)
+            parties = [ent.text for ent in doc.ents if ent.label_ in ("PERSON", "ORG")]
+            dates = [ent.text for ent in doc.ents if ent.label_ == "DATE"]
+            summary.append({
+                **r,
+                "parties": sorted(set(parties)),
+                "dates": sorted(set(dates)),
+            })
+        return summary
+
+    def summarize_apa_report(self, results, max_cases=3):
+        """
+        Generate an APA-style paragraph summarizing the case outcomes.
+        """
+        if not results:
+            return "No court records were found for the given search term."
+        summaries = []
+        for i, r in enumerate(results[:max_cases], 1):
+            outcome, _ = self.detect_case_outcome(r.get('snippet', ''))
+            citation = f"{r.get('case', 'Unknown Case')} [{r.get('citations', 'No citation')}]"
+            parties = ', '.join(r.get('parties', [])) or "N/A"
+            summary = (
+                f"{i}. {citation}, {r.get('court', '')}, {r.get('date', '')}. "
+                f"Main parties: {parties}. "
+                f"Outcome: {outcome}. "
+                f"Summary: {r.get('snippet', '')[:150].replace(chr(10), ' ')}{'...' if len(r.get('snippet', '')) > 150 else ''} "
+                f"URL: {r.get('url', '')}"
+            )
+            summaries.append(summary)
+        return "\n".join(summaries)
+            
 nlp = spacy.load("en_core_web_sm")
 
 class DarkelfSpiderAsync:
@@ -2068,7 +2410,8 @@ def print_help():
             ("search <keywords>",     "Search DuckDuckGo (onion)"),
             ("debug <keywords>",      "Search and show full debug info"),
             ("osintscan <term|url>",  "Fetch a URL & extract emails, phones, etc."),
-            ("findonions <keywords>", "Discover .onion services by keywords")
+            ("findonions <keywords>", "Discover .onion services by keywords"),
+            ("govscan",               "Search for All Records - Open Databases")
         ]),
 
         ("Security and Privacy Tools", [
@@ -4394,7 +4737,21 @@ def repl_main():
                 ip = parts[1] if len(parts) > 1 else ""
                 DarkelfIPScan(use_tor=True).lookup(ip)
                 print()
+                
+            elif cmd == "govscan":
+                query = input("Enter legal/court search term: ").strip()
+                scanner = DarkelfGovernmentScanner(max_results=10)
+                print("\n[•] Running multi-source legal records scan. Please wait...\n")
+                results = scanner.run_all(query)
 
+                if not results:
+                    print("[!] No results found.")
+                else:
+                    scanner.pretty_print_cases_rich(results, max_cases=10)
+                    # APA-style summary paragraph
+                    summary = scanner.summarize_apa_report(results)
+                    console.print(Panel(summary, title="APA-style summary report", style="green"))
+                    
             elif cmd == "dnsleak":
                 check_dns_leak()
                 print()
