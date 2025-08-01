@@ -74,7 +74,7 @@
   - Terminal users and hackers  
   - Low-bandwidth or low-resource setups  
   - Privacy-focused professionals  
-  - Secure embedded system browsing  
+  - Secure embedded system browsing
 
 ---
 
@@ -87,7 +87,8 @@
   - Pentesters in terminal-only environments  
   - TraceLabs OSINT hunters  
   - Forensics & recon professionals  
-  - Low-profile red team operatives  
+  - Low-profile red team operatives
+  - Located inside Darkelf CLI OSINT Tool Kit 
 
 ---
 
