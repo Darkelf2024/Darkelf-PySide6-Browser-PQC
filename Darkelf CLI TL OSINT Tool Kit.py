@@ -58,6 +58,7 @@ import argparse
 import logging
 import aiohttp
 import aiohttp_socks
+import numpy as np
 import asyncio
 import mmap
 import ctypes
@@ -88,8 +89,9 @@ import dns.resolver
 import phonenumbers
 import textwrap
 import psutil
+import urllib
 from collections import deque, Counter
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Union, Any
 from datetime import datetime
 from aiohttp_socks import ProxyConnector
 from rich.console import Console
@@ -99,6 +101,7 @@ from rich.rule import Rule
 from rich.align import Align
 from rich.table import Table
 from collections import defaultdict
+from rich.layout import Layout
 from textwrap import wrap
 from getpass import getpass
 from urllib.parse import quote_plus, unquote, parse_qs, urlparse, urljoin
@@ -118,6 +121,7 @@ from aiohttp import ClientTimeout
 import requests
 import spacy
 import pytesseract
+import cv2
 
 # --- Tor integration via Stem ---
 import stem.process
@@ -151,15 +155,206 @@ async def async_fetch_ddg(query, max_results=5):
     except Exception as e:
         return query, f"[Error fetching results: {e}]"
 
-console = Console()
+class LicensePlateOSINT:
+    PLATE_SOURCES = [
+        "stolencars24.eu",
+        "licenseplatesdatabase.com",
+        "platecheck.com",
+        "findbyplate.com",
+        "forum-auto.com",
+        "cartitle.org",
+        "bimmerforums.com",
+        "reddit.com",
+        "opendata.transport.ee",
+        "regitra.lt",
+        "platesmania.com",
+        "platehunter.com",
+        "carjam.co.nz",
+        "numberplates.com",
+        "plateslookup.com",
+        "digitpol.com/stolen-car-database/"
+    ]
+    DDG_ONION_LITE = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
+    TOR_PROXIES = {
+        "http": "socks5h://127.0.0.1:9052",
+        "https": "socks5h://127.0.0.1:9052"
+    }
 
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.proxies = self.TOR_PROXIES
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) LicensePlateOSINT/1.0"
+        })
+
+    def generate_plate_dorks(self, plate, country=None):
+        dorks = [f'"{plate}" site:{site}' for site in self.PLATE_SOURCES]
+        if country:
+            dorks += [f'"{plate}" {country} site:{site}' for site in self.PLATE_SOURCES]
+        dorks += [
+            f'"{plate}" license plate',
+            f'"{plate}" vehicle history',
+            f'"{plate}" stolen',
+            f'"{plate}" intitle:forum',
+            f'"{plate}" inurl:forum',
+            f'"{plate}" police report',
+            f'"{plate}" intext:stolen',
+            f'"{plate}" accident report',
+            f'"{plate}" recovered',
+            f'"{plate}" insurance',
+            f'"{plate}" VIN',
+            f'"{plate}" owner',
+            f'"{plate}" make model',
+            f'"{plate}" carfax',
+            f'"{plate}" site:gov',
+            f'"{plate}" site:reddit.com',
+            f'{plate}',
+            f'{plate} car',
+        ]
+        return list(set(dorks))
+
+    def parse_ddg_lite_results(self, text):
+        soup = BeautifulSoup(text, "html.parser")
+        results = []
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            label = a.get_text(strip=True)
+            if href.startswith("http") and label and "google.com" not in href.lower():
+                results.append((label, href))
+        return results
+
+    def ddg_onion_search(self, query, max_results=8):
+        try:
+            r = self.session.get(f"{self.DDG_ONION_LITE}?q={quote_plus(query)}", timeout=20)
+            results = self.parse_ddg_lite_results(r.text)
+            if not results:
+                r2 = self.session.post(self.DDG_ONION_LITE, data={"q": query}, timeout=20)
+                results = self.parse_ddg_lite_results(r2.text)
+            return results[:max_results] if results else []
+        except Exception:
+            return []
+
+    def fetch_url(self, url, plate):
+        try:
+            r = self.session.get(url, timeout=14)
+            soup = BeautifulSoup(r.text, "html.parser")
+            text = soup.get_text(separator=" ", strip=True)
+            snippet = ""
+            idx = text.lower().find(plate.lower())
+            if idx != -1:
+                snippet = text[max(0, idx-60):idx+60]
+            else:
+                snippet = text[:180]
+            return text, snippet
+        except Exception:
+            return "", ""
+
+    def check_digitpol_direct(self, plate):
+        url = f"https://www.digitpol.com/stolen-car-database/?search={plate}"
+        try:
+            r = self.session.get(url, timeout=20)
+            if plate.lower() in r.text.lower():
+                idx = r.text.lower().find(plate.lower())
+                snippet = r.text[max(0, idx-80):idx+80] if idx != -1 else ""
+                return {"url": url, "title": f"Digitpol: {plate}", "snippet": snippet}
+        except Exception:
+            pass
+        return None
+
+    def check_findbyplate_direct(self, plate):
+        url = f"https://findbyplate.com/CA/search/?q={plate}"
+        try:
+            r = self.session.get(url, timeout=20)
+            if plate.lower() in r.text.lower():
+                idx = r.text.lower().find(plate.lower())
+                snippet = r.text[max(0, idx-80):idx+80] if idx != -1 else ""
+                return {"url": url, "title": f"FindByPlate: {plate}", "snippet": snippet}
+        except Exception:
+            pass
+        return None
+
+    def check_plateslookup_direct(self, plate):
+        url = f"https://plateslookup.com/search/?q={plate}"
+        try:
+            r = self.session.get(url, timeout=20)
+            if plate.lower() in r.text.lower():
+                idx = r.text.lower().find(plate.lower())
+                snippet = r.text[max(0, idx-80):idx+80] if idx != -1 else ""
+                return {"url": url, "title": f"PlatesLookup: {plate}", "snippet": snippet}
+        except Exception:
+            pass
+        return None
+
+    def run(self, plate, country=None, max_results=20):
+        dorks = self.generate_plate_dorks(plate, country)
+        seen_urls = set()
+        all_urls = []
+        # Collect URLs from all dorks (DuckDuckGo Onion) and filter out google.com
+        for dork in dorks:
+            hits = self.ddg_onion_search(dork, max_results=2)
+            for label, url in hits:
+                if "google.com" in url.lower():
+                    continue
+                if url not in seen_urls:
+                    seen_urls.add(url)
+                    all_urls.append((label, url))
+        # Fetch all URLs in parallel, classify
+        profiles, mentions = [], []
+        exact_plates, correlated = set(), []
+        all_fetched = []
+        def fetch_and_classify(label, url):
+            text, snippet = self.fetch_url(url, plate)
+            entry = {"url": url, "title": label, "snippet": snippet}
+            found = False
+            if plate.lower() in url.lower() or plate.lower() in label.lower():
+                profiles.append(entry)
+                found = True
+            if not found and plate.lower() in snippet.lower():
+                mentions.append(entry)
+                found = True
+            if re.search(rf"\b{re.escape(plate)}\b", text, re.I):
+                exact_plates.add(plate)
+                if not found:
+                    mentions.append(entry)
+                    found = True
+            if found:
+                correlated.append(entry)
+            all_fetched.append(entry)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(fetch_and_classify, label, url) for label, url in all_urls]
+            for _ in as_completed(futures):
+                pass
+        # Add direct database hits (never google.com)
+        for check_fn in [self.check_digitpol_direct, self.check_findbyplate_direct, self.check_plateslookup_direct]:
+            res = check_fn(plate)
+            if res:
+                profiles.append(res)
+                correlated.append(res)
+                all_fetched.append(res)
+                exact_plates.add(plate)
+        return {
+            "success": bool(profiles or mentions or exact_plates or correlated),
+            "plate": plate,
+            "country": country,
+            "profiles": profiles,
+            "mentions": mentions,
+            "exact_plates": sorted(exact_plates),
+            "correlated": correlated,
+            "all_links": [url for _, url in all_urls],
+            "all_snippets": all_fetched,
+            "dorks_run": dorks,
+            "errors": [],
+            "error": "No results found." if not (profiles or mentions or exact_plates or correlated) else "",
+        }
+        
 # Load SpaCy model globally for efficiency
 nlp = spacy.load("en_core_web_sm")
 
 class DarkelfGovernmentScanner:
     """
     International legal/court scanner.
-    Uses CourtListener (US), BAILII (UK/Commonwealth), AustLII (Australia), and can be extended.
+    Uses CourtListener (US), BAILII (UK/Commonwealth), AustLII (Australia),
+    and various international LII portals.
     Includes SpaCy NER summaries and rich table output.
     """
 
@@ -168,6 +363,15 @@ class DarkelfGovernmentScanner:
     }
     BAILII_SEARCH_URL = "https://www.bailii.org/cgi-bin/lucy_search_1.cgi"
     AUSTLII_SEARCH_URL = "http://www.austlii.edu.au/cgi-bin/sinosrch.cgi"
+
+    WORLD_LII_URLS = {
+        "paclii": "http://www.paclii.org/cgi-bin/sinosrch.cgi",
+        "nzlii": "http://www.nzlii.org/cgi-bin/sinosrch.cgi",
+        "saflii": "http://www.saflii.org/cgi-bin/sinosrch.cgi",
+        "hklii": "http://www.hklii.org/cgi-bin/sinosrch.cgi",
+        "irlii": "http://www.irlii.org/cgi-bin/sinosrch.cgi",
+        "worldlii": "http://www.worldlii.org/cgi-bin/sinosrch.cgi",
+    }
 
     OUTCOME_KEYWORDS = [
         "affirmed", "reversed", "vacated", "remanded", "denied", "granted",
@@ -346,14 +550,42 @@ class DarkelfGovernmentScanner:
         except Exception as e:
             self.logger.error(f"AustLII error: {e}")
 
+    def _search_generic_lii(self, query, source_key):
+        try:
+            base_url = self.WORLD_LII_URLS[source_key]
+            params = {
+                "query": query,
+                "results": self.max_results,
+                "submit": "Search",
+            }
+            resp = self._safe_get(base_url, params=params, timeout=20)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            results = soup.find_all("li")
+            for li in results[:self.max_results]:
+                a = li.find("a", href=True)
+                if not a:
+                    continue
+                url = a["href"]
+                title = a.get_text()
+                snippet = li.get_text(separator=" ", strip=True)
+                self.results.append({
+                    "source": source_key.upper(),
+                    "case": title,
+                    "court": "",
+                    "date": "",
+                    "status": "",
+                    "citations": "",
+                    "docket_number": "",
+                    "url": url if url.startswith("http") else base_url.rsplit("/", 1)[0] + "/" + url,
+                    "snippet": snippet,
+                })
+        except Exception as e:
+            self.logger.error(f"{source_key.upper()} error: {e}")
+
     def parse_courtlistener_html(self, html):
-        # Placeholder for HTML fallback (not implemented)
         return []
 
     def run_all(self, query, sources=None):
-        """
-        sources: list of which sources to use. Default: all.
-        """
         self.results.clear()
         queries = list(set([
             query,
@@ -368,6 +600,9 @@ class DarkelfGovernmentScanner:
                 self.search_bailii(q)
             if 'austlii' in sources:
                 self.search_austlii(q)
+            for extra in self.WORLD_LII_URLS.keys():
+                if extra in sources:
+                    self._search_generic_lii(q, extra)
         return self._summarize_results()
 
     def detect_case_outcome(self, snippet):
@@ -381,46 +616,23 @@ class DarkelfGovernmentScanner:
                 return word.capitalize(), None
         return "Outcome not detected", None
 
-    def pretty_print_cases_rich(self, results, max_cases=10):
+    def pretty_print_cases_rich(self, results, max_cases=5):
         console = Console()
-        term_width = shutil.get_terminal_size((80, 20)).columns
-        url_max = max(24, min(56, term_width - 95))
-        table = Table(
-            title=f"Top {min(max_cases, len(results))} Legal Results",
-            show_lines=True,
-            border_style="green",
-            expand=True,
-        )
-        table.add_column("Source", style="cyan", min_width=7, max_width=10, no_wrap=True)
-        table.add_column("Case Name", style="bold green", min_width=20, max_width=32, overflow="fold", no_wrap=False)
-        table.add_column("Court", style="magenta", min_width=14, max_width=22, overflow="fold", no_wrap=False)
-        table.add_column("Date", style="yellow", min_width=10, max_width=12, overflow="fold", no_wrap=True)
-        table.add_column("Outcome", style="red", min_width=13, max_width=20, overflow="fold", no_wrap=True)
-        table.add_column("Parties", style="white", min_width=20, max_width=32, overflow="fold", no_wrap=False)
-        table.add_column(
-            "URL",
-            style="blue",
-            min_width=22,
-            max_width=url_max,
-            overflow="fold",
-            no_wrap=False
-        )
-
-        for r in results[:max_cases]:
+        for i, r in enumerate(results[:max_cases], 1):
             outcome, _ = self.detect_case_outcome(r.get("snippet", ""))
-            parties = ', '.join(r.get('parties', [])) or "N/A"
-            url = r.get('url', '')
-            table.add_row(
-                r.get('source', '') or "—",
-                r.get('case', '') or "—",
-                r.get('court', '') or "—",
-                r.get('date', '') or "—",
-                outcome or "—",
-                parties,
-                url
-            )
+            parties = ', '.join(r.get("parties", [])) or "N/A"
+            url = r.get('url', '—')
 
-        console.print(table)
+            md = f"""
+    **Source:** {r.get('source', '—')}
+    **Case:** {r.get('case', '—')}
+    **Court:** {r.get('court', '—')}
+    **Date:** {r.get('date', '—')}
+    **Outcome:** {outcome}
+    **Parties:** {parties}
+    **URL:** {url}
+    """
+            console.print(Panel(Markdown(md.strip()), border_style="green"))
 
     def _summarize_results(self):
         summary = []
@@ -456,42 +668,7 @@ class DarkelfGovernmentScanner:
             )
             summaries.append(summary)
         return "\n".join(summaries)
-        
-    def _summarize_results(self):
-        summary = []
-        for r in self.results:
-            text = " ".join(str(val) for val in r.values() if val)
-            doc = nlp(text)
-            parties = [ent.text for ent in doc.ents if ent.label_ in ("PERSON", "ORG")]
-            dates = [ent.text for ent in doc.ents if ent.label_ == "DATE"]
-            summary.append({
-                **r,
-                "parties": sorted(set(parties)),
-                "dates": sorted(set(dates)),
-            })
-        return summary
 
-    def summarize_apa_report(self, results, max_cases=3):
-        """
-        Generate an APA-style paragraph summarizing the case outcomes.
-        """
-        if not results:
-            return "No court records were found for the given search term."
-        summaries = []
-        for i, r in enumerate(results[:max_cases], 1):
-            outcome, _ = self.detect_case_outcome(r.get('snippet', ''))
-            citation = f"{r.get('case', 'Unknown Case')} [{r.get('citations', 'No citation')}]"
-            parties = ', '.join(r.get('parties', [])) or "N/A"
-            summary = (
-                f"{i}. {citation}, {r.get('court', '')}, {r.get('date', '')}. "
-                f"Main parties: {parties}. "
-                f"Outcome: {outcome}. "
-                f"Summary: {r.get('snippet', '')[:150].replace(chr(10), ' ')}{'...' if len(r.get('snippet', '')) > 150 else ''} "
-                f"URL: {r.get('url', '')}"
-            )
-            summaries.append(summary)
-        return "\n".join(summaries)
-            
 nlp = spacy.load("en_core_web_sm")
 
 class DarkelfSpiderAsync:
@@ -2411,7 +2588,8 @@ def print_help():
             ("debug <keywords>",      "Search and show full debug info"),
             ("osintscan <term|url>",  "Fetch a URL & extract emails, phones, etc."),
             ("findonions <keywords>", "Discover .onion services by keywords"),
-            ("govscan",               "Search for All Records - Open Databases")
+            ("govscan",               "Search for All Records - Open Databases"),
+            ("licenseplate",          "Look up License Plate Information")
         ]),
 
         ("Security and Privacy Tools", [
@@ -4738,6 +4916,58 @@ def repl_main():
                 DarkelfIPScan(use_tor=True).lookup(ip)
                 print()
                 
+            elif cmd.startswith("licenseplate"):
+                parts = cmd.strip().split()
+
+                if len(parts) == 2:
+                    plate_number = parts[1].upper()
+                else:
+                    plate_number = input("Enter license plate number: ").strip().upper()
+
+                country = input("Country code (optional, e.g. FR, DE, US): ").strip().upper() or None
+
+                scanner = LicensePlateOSINT()
+                result = scanner.run(plate_number, country=country, max_results=20)
+
+                if result["success"]:
+                    print(f"\n🔍 License Plate Queried: {result['plate']}")
+                    print(f"🌍 Country detected: {result.get('country') or 'Unknown'}")
+
+                    print("\n🔗 [Profiles] (Plate in URL or Title):")
+                    if result["profiles"]:
+                        for p in result["profiles"]:
+                            print(f"  - {p['url']}")
+                            print(f"    Title: {p.get('title', '')}")
+                            print(f"    Snippet: {p.get('snippet','')[:350]}\n")
+                    else:
+                        print("  None")
+
+                    print("\n🟡 [Mentions/Leaks] (Plate in snippet):")
+                    if result["mentions"]:
+                        for m in result["mentions"]:
+                            print(f"  - {m['url']}")
+                            print(f"    Title: {m.get('title', '')}")
+                            print(f"    Snippet: {m.get('snippet','')[:350]}\n")
+                    else:
+                        print("  None")
+
+                    print("\n✅ [Exact Plates Found on Linked Pages]:")
+                    if result["exact_plates"]:
+                        print(", ".join(result["exact_plates"]))
+                    else:
+                        print("  None")
+
+                    print("\n🔗 [All Links Found]:")
+                    if result["all_links"]:
+                        for link in result["all_links"]:
+                            print(f"  - {link}")
+                    else:
+                        print("  None")
+
+                    print("\n🧑‍💻 [All Dorks Tried]:")
+                    for dork in result["dorks_run"]:
+                        print(f"  - {dork}")
+
             elif cmd == "govscan":
                 query = input("Enter legal/court search term: ").strip()
                 scanner = DarkelfGovernmentScanner(max_results=10)
@@ -4751,7 +4981,7 @@ def repl_main():
                     # APA-style summary paragraph
                     summary = scanner.summarize_apa_report(results)
                     console.print(Panel(summary, title="APA-style summary report", style="green"))
-                    
+
             elif cmd == "dnsleak":
                 check_dns_leak()
                 print()
