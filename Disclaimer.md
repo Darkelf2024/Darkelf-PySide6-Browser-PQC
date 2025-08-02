@@ -95,3 +95,17 @@ Users of Darkelf Browser agree to:
 
 Darkelf Browser is licensed under the **GNU Lesser General Public License (LGPL v3)**.  
 See `LICENSE` for full details.
+
+📡 Third-Party APIs Used
+
+Darkelf Browser leverages the following publicly accessible APIs for OSINT and IP intelligence:
+
+- [ip-api.com](http://ip-api.com/) — IP Geolocation (Free tier, requires attribution)
+- [ipinfo.io](https://ipinfo.io/) — IP Intelligence (Free tier attribution)
+- [ipwho.is](https://ipwho.is/) — IP Data API
+- [icanhazip.com](https://icanhazip.com) — Public IP Detection
+- [api64.ipify.org](https://www.ipify.org) — IP Address Lookup
+- [CourtListener](https://www.courtlistener.com/api/) — Legal Case Metadata API
+- [DuckDuckGo Lite](https://lite.duckduckgo.com/) — Lightweight Search Interface
+
+Please review each API’s terms of service before use.
