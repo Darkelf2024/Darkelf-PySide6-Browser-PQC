@@ -83,6 +83,14 @@ Special thanks to the cybersecurity, privacy, and open-source communities.
 
 ---
 
+🧭 Code of Ethics
+
+Users of Darkelf Browser agree to:
+
+- Use this tool only for legal, ethical, and educational purposes.
+- Respect the Terms of Service of any queried API or website.
+- Avoid targeting or scanning systems without explicit permission.
+
 ## :unlock: License
 
 Darkelf Browser is licensed under the **GNU Lesser General Public License (LGPL v3)**.  
