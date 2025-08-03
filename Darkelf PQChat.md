@@ -88,6 +88,25 @@ Recipient user ID (published prekey): alice
 [*] Async handshake complete. You can now send messages.
 ```
 
+### 1. Start External Server
+
+```sh
+Start as (s)erver or (c)lient? [s/c]: s
+Host (default 127.0.0.1): 0.0.0.0
+Port (default 9000): 9000
+Your user ID for prekey: 2027
+```
+
+### 2. Start as External Client 
+
+```sh
+Start as (s)erver or (c)lient? [s/c]: c
+Host (default 127.0.0.1): 68.144.21.133
+Port (default 9000): 9000
+Your user ID for prekey: 2026
+Connect to recipient ID: 2027
+```
+
 **Note:**  
 - The server auto-publishes its prekey if missing.
 - The client can connect if it has access to the encrypted mailbox file (`prekeys.json.enc`) containing the recipient's published prekey (same directory or sync the file).
