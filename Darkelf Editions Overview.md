@@ -78,7 +78,7 @@
 
 ---
 
-## 🔍 Darkelf CLI TL Edition
+## 🔍 Darkelf CLI TL OSINT Tool Kit
 
 - **Use Case:** OSINT, TraceLabs, Pentesting (CLI Version)  
 - **Description:**  
@@ -88,7 +88,8 @@
   - TraceLabs OSINT hunters  
   - Forensics & recon professionals  
   - Low-profile red team operatives
-  - Located inside Darkelf CLI OSINT Tool Kit 
+  - CLI Browser located inside Darkelf CLI OSINT Tool Kit
+  - PQChat - Kyber768 (Post Quantum)
 
 ---
 
@@ -102,7 +103,7 @@
 | Vault                | GUI       | Stealth daily browsing                 | Script blocking, anti-tracking        |
 | Vault TL             | GUI       | OSINT, CTFs, red teaming               | OSINT tooling integrations            |
 | CLI                  | Terminal  | Retro, secure terminal browsing        | Text-based browser                    |
-| CLI TL               | Terminal  | OSINT/pentest in terminal              | CLI + recon modules                   |
+| CLI TL OSINT         | Terminal  | OSINT/pentest in terminal              | CLI + recon modules                   |
 
 ---
 
