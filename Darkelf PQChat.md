@@ -210,4 +210,4 @@ The Darkelf CLI prompt will be restored and you can enter new commands or start 
 
 ---
 
-**For more information, see the source code and issues on [GitHub]([https://github.com/yourrepo/yourproject](https://github.com/Darkelf2024/Darkelf-Browser-v3-PQC)).**
+**For more information, see the source code and issues on [GitHub](https://github.com/Darkelf2024/Darkelf-Browser-v3-PQC).**
