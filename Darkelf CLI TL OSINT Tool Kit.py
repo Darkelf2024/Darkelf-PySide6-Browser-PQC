@@ -1,4 +1,4 @@
-# Darkelf CLI Browser v3.0 – Secure, Privacy-Focused Command-Line Web Browser
+# Darkelf CLI TL OSINT Tool Kit v3.0 – Secure, Privacy-Focused Command-Line Web Browser
 # Copyright (C) 2025 Dr. Kevin Moore
 #
 # SPDX-License-Identifier: LGPL-3.0-or-later
@@ -108,16 +108,19 @@ from urllib.parse import quote_plus, unquote, parse_qs, urlparse, urljoin
 from bs4 import BeautifulSoup
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from oqs import KeyEncapsulation
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from requests import Response
 from phonenumbers import carrier, geocoder, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.markdown import Markdown
 from aiohttp import ClientTimeout
+import socks
 import requests
 import spacy
 import pytesseract
@@ -155,6 +158,385 @@ async def async_fetch_ddg(query, max_results=5):
     except Exception as e:
         return query, f"[Error fetching results: {e}]"
 
+
+# --- Cross-platform RAM disk location ---
+def get_ramdisk_path(filename="prekeys.json.enc"):
+    # Linux
+    if sys.platform.startswith("linux"):
+        ramdisk = "/dev/shm"
+    # macOS (Apple Silicon and Intel, including M1-M4)
+    elif sys.platform == "darwin":
+        ramdisk = "/private/tmp"
+        # Optionally, use a custom RAM disk: /Volumes/RAMDisk (if user mounts one)
+        if os.path.exists("/Volumes/RAMDisk"):
+            ramdisk = "/Volumes/RAMDisk"
+    # Fallback: system temp dir (not always RAM, but best effort)
+    else:
+        ramdisk = os.environ.get("TMPDIR") or "/tmp"
+    return os.path.join(ramdisk, filename)
+
+KEM_ALGO = "Kyber768"
+PREKEYS_FILE = get_ramdisk_path()
+
+def derive_key(password, salt, iterations=150_000):
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=iterations,
+    )
+    return base64.urlsafe_b64encode(kdf.derive(password.encode()))
+
+class DarkelfPQChat:
+    """
+    PQ chat with Ed25519 identity, Kyber768 session, replay protection,
+    and async X3DH-style prekey support (encrypted mailbox in RAM).
+    """
+    def _start_intrusion_monitor(self):
+        def monitor():
+            log_path = get_ramdisk_path(".darkelf_intrusion_log")
+            # Only alert if the process name exactly matches a known tool
+            suspicious = {
+                "nmap", "tcpdump", "wireshark", "netcat", "nc", "socat", "aircrack", "ettercap"
+            }
+            seen = set()
+            while not self._exit_chat:
+                try:
+                    for proc in psutil.process_iter(['pid', 'name']):
+                        pname = proc.info['name'].lower()
+                        # Only exact match (no substring match)
+                        if pname in suspicious:
+                            entry = f"{pname}:{proc.info['pid']}"
+                            if entry not in seen:
+                                seen.add(entry)
+                                with open(log_path, "a") as f:
+                                    f.write(f"[!] Suspicious process: {pname} (PID: {proc.info['pid']})\n")
+                                print(f"\n[ALERT] Suspicious process detected: {pname} (PID: {proc.info['pid']})\nYou: ", end="")
+                    time.sleep(10)
+                except Exception:
+                    pass
+        threading.Thread(target=monitor, daemon=True).start()
+
+    def __init__(self, is_initiator=True, their_prekey_bundle=None, my_id="alice"):
+        self.kem_algo = KEM_ALGO
+        self.is_initiator = is_initiator
+        self.sock = None
+        self.my_id = my_id
+
+        self.root_key = secrets.token_bytes(32)
+        self.send_chain_key = None
+        self.recv_chain_key = None
+
+        # Identity keys
+        self.identity_sk = Ed25519PrivateKey.generate()
+        self.identity_pk = self.identity_sk.public_key()
+
+        self.kem_self = oqs.KeyEncapsulation(self.kem_algo)
+        self.pk_self = self.kem_self.generate_keypair()
+        self.pk_length = self.kem_self.details['length_public_key']
+        self.ct_length = self.kem_self.details['length_ciphertext']
+        self.pk_remote = None
+
+        # For replay/ordering
+        self.send_count = 0
+        self.recv_count = 0
+
+        # Prekey support
+        self.prekey_sk = oqs.KeyEncapsulation(self.kem_algo)
+        self.prekey_pk = self.prekey_sk.generate_keypair()
+        self.prekey_id = secrets.token_hex(4)
+        self.prekey_used = False
+
+        # Remote bundle (for initiator)
+        self.their_prekey_bundle = their_prekey_bundle
+
+        self._exit_chat = False
+
+        # --- Encrypted mailbox ---
+        self._mailbox_key = None
+        self._mailbox_salt = None
+        self._ensure_mailbox_key()
+
+    # --- Mailbox encryption helpers ---
+    def _ensure_mailbox_key(self):
+        # Prompt for passphrase, or reuse if set
+        if self._mailbox_key and self._mailbox_salt:
+            return
+        while True:
+            password = getpass(f"[Prekey Mailbox] Enter passphrase for mailbox at {PREKEYS_FILE}: ")
+            if not password:
+                print("Passphrase required. Try again.")
+                continue
+            if os.path.exists(PREKEYS_FILE):
+                with open(PREKEYS_FILE, "rb") as f:
+                    salt = f.read(16)
+                key = derive_key(password, salt)
+                try:
+                    with open(PREKEYS_FILE, "rb") as f:
+                        f.read(16)  # skip salt
+                        enc = f.read()
+                    Fernet(key).decrypt(enc)
+                    self._mailbox_key = key
+                    self._mailbox_salt = salt
+                    break
+                except Exception:
+                    print("Incorrect passphrase or corrupted mailbox. Try again.")
+                    continue
+            else:
+                # New mailbox, generate salt
+                salt = os.urandom(16)
+                self._mailbox_key = derive_key(password, salt)
+                self._mailbox_salt = salt
+                break
+
+    def _load_mailbox(self):
+        if not os.path.exists(PREKEYS_FILE):
+            return []
+        with open(PREKEYS_FILE, "rb") as f:
+            salt = f.read(16)
+            enc = f.read()
+        if not self._mailbox_key or salt != self._mailbox_salt:
+            # mailbox salt changed, re-prompt
+            self._mailbox_salt = salt
+            password = getpass("[Prekey Mailbox] Enter passphrase for new mailbox: ")
+            self._mailbox_key = derive_key(password, salt)
+        data = Fernet(self._mailbox_key).decrypt(enc)
+        return json.loads(data.decode("utf-8"))
+
+    def _save_mailbox(self, mailbox):
+        enc = Fernet(self._mailbox_key).encrypt(json.dumps(mailbox).encode("utf-8"))
+        with open(PREKEYS_FILE, "wb") as f:
+            f.write(self._mailbox_salt)
+            f.write(enc)
+
+    # --- Prekey mailbox API (encrypted in RAM) ---
+    def publish_prekey_bundle(self):
+        bundle = {
+            "id_pub": self.identity_pk.public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw
+            ).hex(),
+            "prekey_id": self.prekey_id,
+            "prekey_pk": self.prekey_pk.hex(),
+            "prekey_sig": self.identity_sk.sign(self.prekey_pk).hex(),
+            "user": self.my_id
+        }
+        try:
+            mailbox = []
+            if os.path.exists(PREKEYS_FILE):
+                mailbox = self._load_mailbox()
+            mailbox = [b for b in mailbox if b["user"] != self.my_id]
+            mailbox.append(bundle)
+            self._save_mailbox(mailbox)
+            print(f"[Prekey] Published prekey for ID: {self.my_id}")
+        except Exception as e:
+            print(f"[!] Failed to publish prekey: {e}")
+
+    def fetch_prekey_bundle(self, recipient_id):
+        if not os.path.exists(PREKEYS_FILE):
+            print("[!] No prekey mailbox found.")
+            return None
+        try:
+            mailbox = self._load_mailbox()
+            for b in mailbox:
+                if b["user"] == recipient_id:
+                    return b
+            print(f"[!] No prekey found for {recipient_id}")
+            return None
+        except Exception as e:
+            print(f"[!] Failed to load mailbox: {e}")
+            return None
+
+    def consume_own_prekey(self):
+        if not os.path.exists(PREKEYS_FILE):
+            return
+        try:
+            mailbox = self._load_mailbox()
+            mailbox = [b for b in mailbox if b["user"] != self.my_id]
+            self._save_mailbox(mailbox)
+        except Exception as e:
+            print(f"[!] Failed to consume own prekey: {e}")
+
+    # --- Secure mailbox wipe (RAM disk) ---
+    def _secure_wipe_prekeys(self):
+        if not os.path.exists(PREKEYS_FILE):
+            return
+        try:
+            size = os.path.getsize(PREKEYS_FILE)
+            with open(PREKEYS_FILE, "r+b") as f:
+                for _ in range(3):
+                    f.seek(0)
+                    f.write(os.urandom(size))
+                    f.flush()
+            os.remove(PREKEYS_FILE)
+            print("[*] Securely wiped encrypted prekey mailbox.")
+        except Exception as e:
+            print(f"[!] Failed to securely wipe prekeys: {e}")
+
+    # ---- PQ Chat Handshake and Messaging (unchanged) ----
+    def _hkdf(self, input_key_material, context=b"", length=32):
+        return HKDF(
+            algorithm=hashes.SHA256(),
+            length=length,
+            salt=None,
+            info=context
+        ).derive(input_key_material)
+
+    def async_handshake_initiator(self, remote_bundle):
+        id_pub_bytes = bytes.fromhex(remote_bundle["id_pub"])
+        prekey_pk = bytes.fromhex(remote_bundle["prekey_pk"])
+        prekey_sig = bytes.fromhex(remote_bundle["prekey_sig"])
+        id_pub = Ed25519PublicKey.from_public_bytes(id_pub_bytes)
+        id_pub.verify(prekey_sig, prekey_pk)
+        kem_temp = oqs.KeyEncapsulation(self.kem_algo)
+        ct, shared_secret = kem_temp.encap_secret(prekey_pk)
+        auth_packet = json.dumps({
+            "ct": ct.hex(),
+            "id_pub": self.identity_pk.public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw
+            ).hex(),
+            "prekey_id": remote_bundle["prekey_id"]
+        }).encode()
+        self.sock.sendall(len(auth_packet).to_bytes(4, "big") + auth_packet)
+        self.root_key = self._hkdf(shared_secret, b"root")
+        self.send_chain_key = self.root_key
+        self.recv_chain_key = self.root_key
+        self.send_count = 0
+        self.recv_count = 0
+
+    def async_handshake_responder(self):
+        length = int.from_bytes(self._recv_exact(4), "big")
+        pkt = self._recv_exact(length)
+        data = json.loads(pkt)
+        ct = bytes.fromhex(data["ct"])
+        peer_id_pub = bytes.fromhex(data["id_pub"])
+        if self.prekey_used:
+            raise Exception("[!] Prekey already used!")
+        self.prekey_used = True
+        self.consume_own_prekey()
+        shared_secret = self.prekey_sk.decap_secret(ct)
+        self.root_key = self._hkdf(shared_secret, b"root")
+        self.send_chain_key = self.root_key
+        self.recv_chain_key = self.root_key
+        self.send_count = 0
+        self.recv_count = 0
+
+    def next_message_key(self, chain_key, count):
+        context = b"msg" + count.to_bytes(8, 'big')
+        message_key = self._hkdf(chain_key + context, b"msg")
+        next_chain_key = self._hkdf(chain_key + b"chain", b"chain")
+        return message_key, next_chain_key
+
+    def encrypt_message(self, plaintext):
+        self.send_count += 1
+        message_key, self.send_chain_key = self.next_message_key(self.send_chain_key, self.send_count)
+        nonce = secrets.token_bytes(12)
+        cipher = ChaCha20Poly1305(message_key)
+        ciphertext = cipher.encrypt(nonce, plaintext.encode('utf-8'), None)
+        payload = {
+            "count": self.send_count,
+            "nonce": nonce.hex(),
+            "cipher": ciphertext.hex()
+        }
+        return json.dumps(payload).encode()
+
+    def decrypt_message(self, pkt):
+        data = json.loads(pkt)
+        count = data["count"]
+        nonce = bytes.fromhex(data["nonce"])
+        ciphertext = bytes.fromhex(data["cipher"])
+        if count != self.recv_count + 1:
+            raise ValueError(f"Out-of-order or replayed message: expected {self.recv_count + 1}, got {count}")
+        self.recv_count = count
+        message_key, self.recv_chain_key = self.next_message_key(self.recv_chain_key, self.recv_count)
+        cipher = ChaCha20Poly1305(message_key)
+        return cipher.decrypt(nonce, ciphertext, None).decode('utf-8')
+
+    def _recv_exact(self, nbytes):
+        buf = b""
+        while len(buf) < nbytes:
+            chunk = self.sock.recv(nbytes - len(buf))
+            if not chunk:
+                raise ConnectionError("Socket closed unexpectedly")
+            buf += chunk
+        return buf
+
+    def _send_packet(self, payload: bytes):
+        self.sock.sendall(len(payload).to_bytes(4, 'big') + payload)
+
+    def _recv_packet(self):
+        length_bytes = self._recv_exact(4)
+        if not length_bytes:
+            raise ConnectionError("Socket closed unexpectedly")
+        length = int.from_bytes(length_bytes, 'big')
+        return self._recv_exact(length)
+
+    def connect_async(self, host, port, recipient_id):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.connect((host, port))
+        remote_bundle = self.fetch_prekey_bundle(recipient_id)
+        if not remote_bundle:
+            raise Exception("No prekey bundle found for recipient")
+        self.async_handshake_initiator(remote_bundle)
+        print("[*] Async handshake complete. You can now send messages.")
+        self._start_chat()
+
+    def accept_async(self, host, port):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.bind((host, port))
+        self.sock.listen(1)
+        print(f"[Server] Listening on {host}:{port} (async mode)")
+        self.sock, _ = self.sock.accept()
+        print("[Server] Connection accepted")
+        self.async_handshake_responder()
+        print("[*] Async handshake complete. You can now receive messages.")
+        self._start_chat()
+
+    def _start_chat(self):
+        self._exit_chat = False
+        self._start_intrusion_monitor()
+        threading.Thread(target=self._receiver_thread, daemon=True).start()
+        try:
+            while not self._exit_chat:
+                msg = input("You: ")
+                if msg.lower() in ("exit", "quit", "/exit", "/quit"):
+                    self._exit_chat = True
+                    break
+                pkt = self.encrypt_message(msg)
+                self._send_packet(pkt)
+        except KeyboardInterrupt:
+            print("\n[!] Exiting chat")
+            self._exit_chat = True
+        finally:
+            try:
+                self.sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            self.sock.close()
+            self._secure_wipe_prekeys()
+            print("[*] Chat closed. Returning to CLI menu.")
+
+    def accept(self, host, port):
+        raise NotImplementedError("Use accept_async() for async-prekey PQ chat.")
+
+    def connect(self, host, port):
+        raise NotImplementedError("Use connect_async() with recipient_id for async-prekey PQ chat.")
+
+    def _receiver_thread(self):
+        while not self._exit_chat:
+            try:
+                data = self._recv_packet()
+                try:
+                    message = self.decrypt_message(data)
+                    print(f"\rFriend: {message}\nYou: ", end="")
+                except Exception as e:
+                    print(f"[!] Failed to decrypt: {e}")
+            except Exception as e:
+                if not self._exit_chat:
+                    print(f"[!] Connection error: {e}")
+                break
+                
 class LicensePlateOSINT:
     PLATE_SOURCES = [
         "stolencars24.eu",
@@ -2149,7 +2531,6 @@ def encrypt_log(message, key):
 
 def get_fernet_key(path="logkey.bin"):
     from cryptography.fernet import Fernet
-    import base64, os
 
     def is_valid_fernet_key(k):
         try:
@@ -2579,7 +2960,7 @@ end tell'''
         console.print(f"❌ Failed to open tool '{tool}': {e}")
         
 def print_help():
-    console.print("[bold cyan]Darkelf CLI Browser — Command Reference[/bold cyan]\n")
+    console.print("[bold cyan]Darkelf CLI TL OSINT Tool Kit — Command Reference[/bold cyan]\n")
     console.print("Select by and type full command:\n")
 
     categories = [
@@ -2607,7 +2988,9 @@ def print_help():
             ("emailintel <email>",    "Lookup MX Information"),
             ("emailhunt <email>",     "Collect Information"),
             ("pegasusmonitor",        "Run Pegasus Infection Check"),
-            ("spider <url>",          "Crawl & Extract information")
+            ("spider <url>",          "Crawl & Extract information"),
+            ("publish-prekey",        "Publish Prekeys for PQChat"),
+            ("pqchat",                "Live Post Quantum Chat")
         ]),
 
         ("Tools and Utilities", [
@@ -4916,6 +5299,12 @@ def repl_main():
                 DarkelfIPScan(use_tor=True).lookup(ip)
                 print()
                 
+            elif cmd.startswith("publish-prekey"):
+                user_id = cmd.split(" ", 1)[1].strip() if " " in cmd else input("Enter your user ID: ").strip()
+                chat = DarkelfPQChat(my_id=user_id)
+                chat.publish_prekey_bundle()
+                print(f"[+] Prekey published for user: {user_id}")
+    
             elif cmd.startswith("licenseplate"):
                 parts = cmd.strip().split()
 
@@ -5114,6 +5503,35 @@ def repl_main():
                 keywords = cmd.split(" ", 1)[1]
                 onion_discovery(keywords, extra_stealth_options=extra_stealth_options if stealth_on else {})
                 print()
+                
+            elif cmd == "pqchat":
+                mode = input("Start as (s)erver or (c)lient? [s/c]: ").strip().lower()
+                is_server = (mode == "s")
+                host = input("Host (default 127.0.0.1): ").strip() or "127.0.0.1"
+                port_input = input("Port (default 9000): ").strip()
+                port = int(port_input) if port_input else 9000
+
+                try:
+                    if is_server:
+                        user_id = input("Your user ID for prekey: ").strip() or "server"
+                        chat = DarkelfPQChat(my_id=user_id)
+                        # Auto-publish if missing
+                        if not chat.fetch_prekey_bundle(user_id):
+                            chat.publish_prekey_bundle()
+                            print(f"[+] Prekey published for user: {user_id}")
+                        chat.accept_async(host, port)
+                    else:
+                        their_id = input("Recipient user ID (published prekey): ").strip()
+                        chat = DarkelfPQChat()
+                        chat.connect_async(host, port, their_id)
+                except OSError as oe:
+                    # Handle address/port in use, etc.
+                    if hasattr(oe, "errno") and oe.errno == 48:
+                        print(f"[!] Port {port} already in use. Try another.")
+                    else:
+                        print(f"[!] Socket error: {oe}")
+                except Exception as e:
+                    print(f"[!] Error starting PQChat: {e}")
 
             elif cmd == "wipe":
                 pq_logger.panic()
@@ -5151,10 +5569,61 @@ def repl_main():
     threading.Thread(target=decoy_traffic_thread, args=(extra_stealth_options,), daemon=True).start()
 
 if __name__ == "__main__":
+    import sys
+
     # 🧠 Check if launched in browser mode
     if "--browser" in sys.argv:
         DarkelfCLIBrowser().run()
-        sys.exit(0)  # Exit cleanly after browser mode
+        sys.exit(0)
+
+    # 🧠 Check if launched in PQChat async-prekey mode
+    if "publish-prekey" in sys.argv:
+        idx = sys.argv.index("publish-prekey")
+        if len(sys.argv) > idx + 1:
+            user_id = sys.argv[idx + 1]
+            chat = DarkelfPQChat(my_id=user_id)
+            chat.publish_prekey_bundle()
+            sys.exit(0)
+        else:
+            print("Usage: python thisfile.py publish-prekey <your_id>")
+            sys.exit(1)
+
+    if "accept-prekey" in sys.argv:
+        idx = sys.argv.index("accept-prekey")
+        if len(sys.argv) > idx + 2:
+            user_id = sys.argv[idx + 1]
+            port = int(sys.argv[idx + 2])
+            chat = DarkelfPQChat(my_id=user_id)
+            chat.accept_async("0.0.0.0", port)
+            sys.exit(0)
+        else:
+            print("Usage: python thisfile.py accept-prekey <your_id> <port>")
+            sys.exit(1)
+
+    if "connect-prekey" in sys.argv:
+        idx = sys.argv.index("connect-prekey")
+        if len(sys.argv) > idx + 3:
+            their_id = sys.argv[idx + 1]
+            host = sys.argv[idx + 2]
+            port = int(sys.argv[idx + 3])
+            chat = DarkelfPQChat()
+            chat.connect_async(host, port, their_id)
+            sys.exit(0)
+        else:
+            print("Usage: python thisfile.py connect-prekey <their_id> <host> <port>")
+            sys.exit(1)
+
+    # 🧠 Legacy PQChat mode (keep for backward compatibility)
+    if "--pqchat" in sys.argv:
+        import argparse
+        parser = argparse.ArgumentParser(description="Post-Quantum Secure Terminal Chat (DarkelfPQChat)")
+        parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to connect/bind")
+        parser.add_argument("--port", type=int, default=9000, help="Port to connect/bind")
+        parser.add_argument("--server", action="store_true", help="Run as server")
+        args, _ = parser.parse_known_args()
+        chat = DarkelfPQChat()
+        chat.run(host=args.host, port=args.port, is_server=args.server)
+        sys.exit(0)
 
     # Step 1: Ensure strong entropy
     ensure_strong_entropy()
