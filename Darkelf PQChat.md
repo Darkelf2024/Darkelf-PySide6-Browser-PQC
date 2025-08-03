@@ -9,7 +9,7 @@
 
 ## What is Darkelf PQChat?
 
-**Darkelf PQChat** is a post-quantum, CLI-based secure chat system designed for the privacy-focused and security-conscious user.  
+**Darkelf PQChat** is a post-quantum, CLI-based secure chat system for privacy-focused and security-conscious users.  
 It uses [Kyber768](https://pq-crystals.org/kyber/) for quantum-resistant key exchange and Ed25519 for identity authentication, combined with an async prekey (X3DH-style) protocol and a symmetric message ratchet for strong forward secrecy.
 
 ---
@@ -23,8 +23,12 @@ It uses [Kyber768](https://pq-crystals.org/kyber/) for quantum-resistant key exc
   Each user is assigned an Ed25519 keypair for strong, fast public-key signatures. All prekeys and sessions are authenticated.
 
 - **Async Prekeys (X3DH-style):**  
-  Initiators can connect to responders even if they're offline, thanks to one-time use prekeys published in a mailbox file (`prekeys.json`).  
+  Initiators can connect even if responders are offline, thanks to one-time use prekeys published in a secure mailbox file (`prekeys.json.enc`).  
   This mirrors the security model of Signal/WhatsApp but with post-quantum crypto.
+
+- **Encrypted RAM-Only Prekey Mailbox:**  
+  All mailbox data (even public prekeys) is AES-encrypted using a passphrase and never written to disk—it's stored in a RAM disk (`/dev/shm` on Linux, `/private/tmp` or `/Volumes/RAMDisk` on macOS).  
+  The mailbox is securely wiped (overwritten and deleted) after use.
 
 - **Replay & Ordering Protection:**  
   All messages are chained with counters and HKDF ratchets. Replay and out-of-order messages are automatically rejected.
@@ -41,14 +45,14 @@ It uses [Kyber768](https://pq-crystals.org/kyber/) for quantum-resistant key exc
 - **No GUI Needed:**  
   Designed for terminal/CLI use—runs on any OS with Python and OQS bindings.
 
-- **Local Mailbox:**  
-  Uses a local `prekeys.json` file to store one-time prekeys, simulating a mailbox server (can be extended to use a real server).
-
 - **One-Time Prekey Consumption:**  
   Each prekey is used only once and is securely deleted after use, providing strong deniability.
 
 - **Works Over LAN, Tor, VPN, or Localhost:**  
   No restrictions on network usage.
+
+- **Intrusion Monitoring:**  
+  Background thread watches for dangerous tools (nmap, tcpdump, etc.) and alerts in real-time, logging alerts only in RAM.
 
 - **Extensible and Auditable:**  
   Fully open source, modular, and easy to extend for research or integration into other secure systems.
@@ -65,6 +69,7 @@ Start as (s)erver or (c)lient? [s/c]: s
 Host (default 127.0.0.1):
 Port (default 9000):
 Your user ID for prekey: alice
+[Prekey Mailbox] Enter passphrase for mailbox at /dev/shm/prekeys.json.enc:
 [+] Prekey published for user: alice
 [Server] Listening on 127.0.0.1:9000 (async mode)
 [Server] Connection accepted
@@ -79,12 +84,14 @@ Start as (s)erver or (c)lient? [s/c]: c
 Host (default 127.0.0.1):
 Port (default 9000):
 Recipient user ID (published prekey): alice
+[Prekey Mailbox] Enter passphrase for mailbox at /dev/shm/prekeys.json.enc:
 [*] Async handshake complete. You can now send messages.
 ```
 
 **Note:**  
 - The server auto-publishes its prekey if missing.
-- The client can connect if it has access to `prekeys.json` with the recipient's published prekey (same directory or sync the file).
+- The client can connect if it has access to the encrypted mailbox file (`prekeys.json.enc`) containing the recipient's published prekey (same directory or sync the file).
+- The mailbox passphrase is required for any access.
 
 ---
 
@@ -138,11 +145,23 @@ The Darkelf CLI prompt will be restored and you can enter new commands or start 
 - **Ephemeral Session Keys:**  
   All session keys are ephemeral and not reused.
 
+- **Encrypted Prekey Mailbox:**  
+  All mailbox contents are Fernet- and PBKDF2-encrypted, with the key derived from your passphrase and a strong random salt.
+
+- **RAM-Only Storage:**  
+  The mailbox is stored only in RAM (never on disk) and securely wiped after use.
+
+- **Zero Knowledge of Private Keys:**  
+  Your private keys never touch disk and are kept only in process memory.
+
+- **Intrusion Monitoring:**  
+  Real-time alerts for dangerous tools, with logs written only to RAM.
+
 ---
 
 ## File Structure
 
-- `prekeys.json` — Local mailbox for user prekey bundles
+- `prekeys.json.enc` — Encrypted mailbox for user prekey bundles (RAM-only, passphrase-protected)
 - `Darkelf_CLI_TL_OSINT Tool Kit.py` — Main CLI and chat implementation
 
 ---
@@ -151,11 +170,13 @@ The Darkelf CLI prompt will be restored and you can enter new commands or start 
 
 1. **On the responder machine:**
     - Start the server via `pqchat` and enter your user ID.
+    - Enter a mailbox passphrase (prompted if missing).
     - Prekey is automatically published if missing.
 
 2. **On the initiator machine:**
-    - Make sure `prekeys.json` is available (copy if needed).
+    - Make sure the encrypted `prekeys.json.enc` is available (copy if needed).
     - Start as client via `pqchat` and enter the responder’s user ID.
+    - Enter the mailbox passphrase.
 
 3. **Chat securely.**
 
@@ -167,7 +188,7 @@ The Darkelf CLI prompt will be restored and you can enter new commands or start 
   Your user ID is any unique string (e.g., your nickname). Use the same ID every time you want others to connect to you.
 
 - **Prekey Mailbox Sharing:**  
-  For cross-machine use, copy `prekeys.json` between computers, or extend to use a server.
+  For cross-machine use, copy the encrypted mailbox file between computers, or extend to use a server.
 
 - **One-Time Prekey:**  
   Each prekey is deleted on use; to accept a new connection, restart as server to republish.
@@ -177,7 +198,8 @@ The Darkelf CLI prompt will be restored and you can enter new commands or start 
 ## Security Best Practices
 
 - **Always use strong, unique user IDs.**
-- **Keep `prekeys.json` secure and private.**
+- **Keep your mailbox passphrase secret and strong.**
+- **Keep `prekeys.json.enc` secure and private.**
 - **Delete chat logs if not needed.**
 - **Run over Tor or VPN for extra network anonymity.**
 
@@ -186,7 +208,7 @@ The Darkelf CLI prompt will be restored and you can enter new commands or start 
 ## Extending Darkelf PQChat
 
 - **Support for network mailbox servers:**  
-  Replace the local `prekeys.json` with a remote server for distributed use.
+  Replace the local encrypted mailbox with a remote server for distributed use.
 - **Integrate with GUI or mobile apps:**  
   The protocol can be adapted to any interface.
 - **Batch Prekeys:**  
@@ -199,7 +221,9 @@ The Darkelf CLI prompt will be restored and you can enter new commands or start 
 - **"No prekey mailbox found":**  
   Ensure you or the recipient have started as server at least once to publish their prekey.
 - **"No prekey bundle found for recipient":**  
-  Make sure the recipient’s prekey is available in `prekeys.json`.
+  Make sure the recipient’s prekey is available in the encrypted mailbox file.
+- **"Incorrect passphrase or corrupted mailbox":**  
+  Make sure you are using the correct mailbox file and passphrase.
 
 ---
 
@@ -209,5 +233,4 @@ The Darkelf CLI prompt will be restored and you can enter new commands or start 
   See source code and repository for export compliance and usage restrictions.
 
 ---
-
 **For more information, see the source code and issues on [GitHub](https://github.com/Darkelf2024/Darkelf-Browser-v3-PQC).**
