@@ -51,6 +51,16 @@
 # NOTE: This is the CLI (Command-Line Interface) edition of Darkelf.
 # It is entirely terminal-based and does not use PyQt5, PySide6, or any GUI frameworks.
 
+# DISCLAIMER:
+# This tool is intended for educational, research, and ethical OSINT (Open Source Intelligence) purposes only.
+# It must only be used on systems and data for which you have explicit, authorized access.
+# The developer assumes no responsibility for misuse or illegal activities performed using this tool.
+
+# NOTE:
+# This tool routes network traffic through the Tor network for anonymity.
+# Ensure your use of Tor and any target services complies with all applicable laws and terms of service.
+
+
 import os
 import sys
 import time
