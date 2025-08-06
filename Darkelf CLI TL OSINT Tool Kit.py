@@ -60,6 +60,9 @@
 # This tool routes network traffic through the Tor network for anonymity.
 # Ensure your use of Tor and any target services complies with all applicable laws and terms of service.
 
+# © [Dr. Kevin Moore] – Original author of Darkelf Post-Quantum AI and DarkelfPQChat  
+# Released under the LGPL license. Contributions welcome.
+
 
 import os
 import sys
