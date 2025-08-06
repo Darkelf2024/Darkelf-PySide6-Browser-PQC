@@ -54,7 +54,7 @@ Command (ask, ingest, summary, analysis, suggestions, osintscan, export, exit):
    - Cross-referencing hashes
    - Suggesting better security practices
 
-3. User typed `osintscan kjm489` — which produced an ❌ Unknown command
+3. User typed `osintscan JohnDoe` — which produced an ❌ Unknown command
 
 4. Then corrected to just `osintscan` — which worked and prompted for a term.
 
