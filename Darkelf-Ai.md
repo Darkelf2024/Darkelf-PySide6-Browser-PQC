@@ -20,7 +20,7 @@ ollama run mistral  # Downloads and caches the model
 ## 🚀 Running Darkelf
 
 ```bash
-python3 "Darkelf_CLI_TL_Browser_TorEnabled_FINAL_INTEGRATED copy 9.py"
+python3 "Darkelf_CLI_TL_OSINT_Tool_Kit.py"
 ```
 
 Once launched, you'll see:
