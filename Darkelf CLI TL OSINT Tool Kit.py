@@ -267,8 +267,8 @@ When asked to summarize, provide concise, high-signal analysis with clear recomm
         proxies = None
         if use_tor:
             proxies = {
-                "http": "socks5h://127.0.0.1:9050",
-                "https": "socks5h://127.0.0.1:9050"
+                "http": "socks5h://127.0.0.1:9052",
+                "https": "socks5h://127.0.0.1:9052"
             }
             
         self.console.print(f"[bold cyan]Running OSINT scan for:[/bold cyan] [bold]{query}[/bold]\n")
