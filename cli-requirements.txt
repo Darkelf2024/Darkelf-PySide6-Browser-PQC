@@ -28,4 +28,4 @@ spacy
 pytesseract
 thinc
 # pip install -r cli-requirements.txt
-liboqs-python 0.12.0 rename to 0.13.0 if liboqs 13 is installed
+liboqs-python 0.12.0 # rename to 0.13.0 if liboqs 13 is installed
