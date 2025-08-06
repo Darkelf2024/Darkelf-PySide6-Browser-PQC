@@ -102,8 +102,10 @@ from rich.align import Align
 from rich.table import Table
 from collections import defaultdict
 from rich.layout import Layout
+from rich import box
 from textwrap import wrap
 from getpass import getpass
+from rich.prompt import Prompt
 from urllib.parse import quote_plus, unquote, parse_qs, urlparse, urljoin
 from bs4 import BeautifulSoup
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -132,6 +134,240 @@ from stem.connection import authenticate_cookie
 from stem.control import Controller
 from stem import Signal as StemSignal
 from stem import process as stem_process
+
+# Redirect stderr to /dev/null
+sys.stderr = open(os.devnull, 'w')
+
+class DarkelfAi:
+    def __init__(self, model_name="mistral", ctx_size=1024):
+        self.console = Console()
+        self.memory = defaultdict(set)
+        self.case_context = ""
+        self.dialogue = deque(maxlen=10)
+
+        self.model_name = model_name
+        self.llm_available = self._start_ollama_server()
+
+        self.system_prompt = (
+            """You are Darkelf, a local cyber-OSINT assistant. You:
+- Detect and correlate emails, hashes, IPs, usernames, names, orgs
+- Reason about suspicious activity
+- Run local searches and suggest follow-up steps
+- Never leak data externally; you are fully offline and secure
+When asked to summarize, provide concise, high-signal analysis with clear recommendations."""
+        )
+
+    def _start_ollama_server(self):
+        try:
+            subprocess.Popen(
+                ["ollama", "serve"],
+                stdout=subprocess.DEVNULL,  # discard stdout
+                stderr=subprocess.DEVNULL   # discard stderr
+            )
+            time.sleep(3)
+            return True
+        except Exception as e:
+            self.console.print(f"[red]❌ Failed to start ollama server: {e}[/red]")
+            return False
+
+    def _call_ollama(self, prompt):
+        try:
+            result = subprocess.run(
+                ["ollama", "run", self.model_name],
+                input=prompt.encode(),
+                stdout=subprocess.PIPE,   # keep LLM output
+                stderr=subprocess.DEVNULL # suppress logs
+            )
+            output = result.stdout.decode(errors="ignore")
+            return output.strip()
+        except Exception as e:
+            return f"[LLM ERROR] {e}"
+
+    @staticmethod
+    def extract_indicators(text):
+        return {
+            "emails": set(re.findall(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", text)),
+            "usernames": set(re.findall(r"@([\w\-_]{3,32})", text)),
+            "hashes": set(re.findall(r"\b[a-fA-F0-9]{32,64}\b", text)),
+            "ips": set(re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", text)),
+            "domains": set(re.findall(r"\b[a-zA-Z0-9-]+\.(com|net|org|io|xyz|ru|cn|gov|edu)\b", text)),
+            "phones": set(re.findall(r"\+?\d[\d\s().\-]{7,}", text)),
+        }
+
+    def ingest_text(self, text):
+        indicators = self.extract_indicators(text)
+        extracted_count = sum(len(v) for v in indicators.values())
+        for label, values in indicators.items():
+            self.memory[label.upper()].update(values)
+        self.case_context += f"\n{text}"
+        if extracted_count > 0:
+            summary = ", ".join([f"{label}:{len(vals)}" for label, vals in indicators.items() if vals])
+            self.console.print(f"[green]🧠 Ingested {len(text)} characters, extracted {extracted_count} indicators ({summary}).[/green]")
+        else:
+            self.console.print(f"[yellow]⚠️ Ingested {len(text)} characters, but found no indicators.[/yellow]")
+
+    def ingest_indicators(self, indicators):
+        for label, values in indicators.items():
+            if isinstance(values, (list, set)):
+                self.memory[label.upper()].update(values)
+        self.console.print("[blue]📌 Indicators added to memory.[/blue]")
+
+    def summarize_memory(self, max_items=5):
+        lines = []
+        for label, values in self.memory.items():
+            sorted_values = sorted(values)
+            if sorted_values:
+                lines.append(
+                    f"{label}: {', '.join(sorted_values[:max_items])}" +
+                    (" ..." if len(sorted_values) > max_items else "")
+                )
+        return "\n".join(lines) if lines else "(No memory yet)"
+
+    def _build_prompt(self, question, max_titles=5):
+        memory = self.summarize_memory()
+        osint_section = ""
+        # Gather OSINT dork results if available
+        if hasattr(self, "last_osint_results"):
+            items = self.last_osint_results[-max_titles:]
+            osint_section = "\n".join(
+                f"- {title}\n  Link: {href}\n  Snippet: {snippet}"
+                for title, href, snippet in items
+            )
+        return (
+            f"{self.system_prompt}\n\n"
+            f"Recent OSINT Results:\n{osint_section}\n\n"
+            f"Indicators:\n{memory}\n\n"
+            f"Q: {question}\nA:"
+        )
+
+    def ask(self, question):
+        prompt = self._build_prompt(question)
+        self.console.print(f"[dim]Prompt length (chars): {len(prompt)}[/dim]")
+        self.console.print("[cyan]🤖 Generating response...[/cyan]\n")
+        answer = self._call_ollama(prompt)
+        print(answer)
+        self.dialogue.append((question, answer.strip()))
+        print()
+        self._suggest_followups(answer)
+
+    def _suggest_followups(self, answer):
+        self.console.print("[blue]Shortcut prompts: 'summary', 'analysis', 'suggestions', 'next steps'[/blue]")
+
+    def export(self, filename=None):
+        filename = filename or f"darkelf_ai_log_{int(time.time())}.json"
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump({
+                "context": self.case_context,
+                "memory": {k: list(v) for k, v in self.memory.items()},
+                "dialogue": list(self.dialogue)
+            }, f, indent=2)
+        self.console.print(f"[cyan]📦 Exported dialogue to {filename}[/cyan]")
+
+    def osintscan(self, query, max_results=10, use_tor=False):
+        proxies = None
+        if use_tor:
+            proxies = {
+                "http": "socks5h://127.0.0.1:9050",
+                "https": "socks5h://127.0.0.1:9050"
+            }
+            
+        self.console.print(f"[bold cyan]Running OSINT scan for:[/bold cyan] [bold]{query}[/bold]\n")
+
+        dork_configs = [
+            (f'"{query}" site:github.com', f'https://duckduckgo.com/html/?q={query}+site:github.com'),
+            (f'"{query}" inurl:profile', f'https://duckduckgo.com/html/?q={query}+inurl:profile'),
+        ]
+        all_results = []
+        headers = {
+            "User-Agent": "Mozilla/5.0 (compatible; DarkelfAI/1.0; +https://github.com/Darkelf2024/)"
+        }
+        self.console.print("[bold underline blue]\nDuckDuckGo Dorking Results:[/bold underline blue]\n")
+        for dork_title, url in dork_configs:
+            self.console.print(f"[bold]🔍 Dork: {dork_title}[/bold]")
+            try:
+                resp = requests.get(url, headers=headers, timeout=12)
+                soup = BeautifulSoup(resp.text, "html.parser")
+                result_links = soup.select(".result__a")
+                for idx, a in enumerate(result_links, 1):
+                    href = a.get("href") or ""
+                    text = a.text.strip()
+                    # Try to get snippet text from result parent, fallback to ""
+                    snippet = ""
+                    parent = a.find_parent("div", class_="result")
+                    if parent:
+                        snippet_tag = parent.select_one(".result__snippet")
+                        snippet = snippet_tag.text.strip() if snippet_tag else ""
+                    if href.startswith("/l/?kh="):
+                        continue
+                    all_results.append((text, href, snippet))
+                    self.console.print(f"   {idx}. [link={href}]{text}[/link]")
+                    if idx >= max_results:
+                        break
+            except Exception as e:
+                self.console.print(f"[red]Error fetching dork results: {e}[/red]")
+            self.console.print()  # Blank line between dorks
+
+        # Save for prompt
+        self.last_osint_results = all_results
+
+        # Ingest the titles, links, and snippets for indicator extraction
+        for title, href, snippet in all_results:
+            self.ingest_text(f"{query} {title} {href} {snippet}")
+        self.ingest_indicators({"USERNAMES": {query}})
+        self.console.print("[green]All indicators ingested.[/green]")
+
+        # Now, after showing results, prompt the user for summary/analysis etc
+        while True:
+            self.console.print(
+                "\n[bold magenta]Type one of: summary, analysis, suggestions, next steps, or type exit to leave.[/bold magenta]"
+            )
+            choice = Prompt.ask("What would you like to do?", default="summary").strip().lower()
+            if choice in ("exit", "q", "quit", "back"):
+                break
+            elif choice in ("summary", "mem"):
+                self.ask(f"Summarize the OSINT findings for '{query}'. What are the key indicators and recommended next steps?")
+            elif choice == "analysis":
+                self.ask(f"Provide a detailed analysis of the findings for '{query}'.")
+            elif choice == "suggestions":
+                self.ask(f"Suggest the next recommended OSINT steps for '{query}'.")
+            elif choice == "next steps":
+                self.ask(f"What should be the next steps in the investigation of '{query}'?")
+            else:
+                self.console.print("[red]❌ Unknown choice. Please type a valid shortcut or type exit to leave.[/red]")
+
+    def run(self):
+        self.console.print("[bold green]👁️‍🗨️ Ready[/bold green]")
+        self.console.print("[bold green]Darkelf AI — Enhanced OSINT Assistant[/bold green]\n")
+        while True:
+            try:
+                command = Prompt.ask("[bold magenta]Command[/bold magenta] (ask, ingest, summary, analysis, suggestions, osintscan, export, exit)").strip().lower()
+                if command == "exit":
+                    break
+                elif command == "ask":
+                    question = Prompt.ask("Ask a question")
+                    self.ask(question)
+                elif command == "ingest":
+                    text = Prompt.ask("Paste case data or notes")
+                    self.ingest_text(text)
+                elif command in ("summary", "mem"):
+                    self.ask("Provide a summary of current indicators")
+                elif command == "analysis":
+                    self.ask("Provide an analysis of findings")
+                elif command == "suggestions":
+                    self.ask("Provide suggestions for next OSINT steps")
+                elif command == "osintscan":
+                    query = Prompt.ask("OSINT scan term/email/username/phone")
+                    self.osintscan(query)
+                elif command == "export":
+                    self.export()
+                else:
+                    self.console.print("[red]❌ Unknown command[/red]")
+            except (KeyboardInterrupt, EOFError):
+                self.console.print("\n[red]Exiting Darkelf AI.[/red]")
+                break
+            except Exception as e:
+                self.console.print(f"[red]Error: {e}[/red]")
+                continue
 
 def get_tor_session():
     session = requests.Session()
@@ -2966,6 +3202,7 @@ def print_help():
     categories = [
         ("General OSINT and Searching", [
             ("search <keywords>",     "Search DuckDuckGo (onion)"),
+            ("darkelf-ai",            "OSINT Analyst"),
             ("debug <keywords>",      "Search and show full debug info"),
             ("osintscan <term|url>",  "Fetch a URL & extract emails, phones, etc."),
             ("findonions <keywords>", "Discover .onion services by keywords"),
@@ -5282,6 +5519,11 @@ def repl_main():
 
             elif cmd == "checkip":
                 check_my_ip()
+                print()
+                
+            elif cmd == "darkelf-ai":
+                bot = DarkelfAi()
+                bot.run()
                 print()
 
             elif cmd == "tlsstatus":
