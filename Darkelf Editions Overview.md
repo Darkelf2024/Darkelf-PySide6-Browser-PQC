@@ -89,7 +89,8 @@
   - Forensics & recon professionals  
   - Low-profile red team operatives
   - CLI Browser located inside Darkelf CLI OSINT Tool Kit
-  - PQChat - Kyber768 (Post Quantum)
+  - DarkelfPQChat - Kyber768 (Post Quantum)+ED25519
+  - Darkelf-Ai (Local Ollama+Mistral)
 
 ---
 
