@@ -63,7 +63,6 @@
 # © [Dr. Kevin Moore] – Original author of Darkelf Post-Quantum AI and DarkelfPQChat  
 # Released under the LGPL license. Contributions welcome.
 
-
 import os
 import sys
 import time
@@ -72,6 +71,7 @@ import logging
 import aiohttp
 import aiohttp_socks
 import numpy as np
+import httpx
 import asyncio
 import mmap
 import ctypes
@@ -133,13 +133,16 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from requests import Response
 from phonenumbers import carrier, geocoder, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from rich.markdown import Markdown
 from aiohttp import ClientTimeout
 import socks
 import requests
 import spacy
 import pytesseract
+import tldextract
 import cv2
+import csv
 
 # --- Tor integration via Stem ---
 import stem.process
@@ -151,6 +154,158 @@ from stem import process as stem_process
 # Redirect stderr to /dev/null
 sys.stderr = open(os.devnull, 'w')
 
+# ---------- Helper: Ollama port check ----------
+def _port_open(host="127.0.0.1", port=11434):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex((host, port)) == 0
+
+# ---------- Helper: Indicator extraction ----------
+HASH_RE = re.compile(r"\b([a-fA-F0-9]{32}|[a-fA-F0-9]{40}|[a-fA-F0-9]{56}|[a-fA-F0-9]{64})\b")
+EMAIL_RE = re.compile(r"\b[a-zA-Z0-9_.+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,63}\b")
+USERNAME_RE = re.compile(r"@([\w\-_]{3,32})")
+IPV4_RE = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d{1,2})\.){3}(?:25[0-5]|2[0-4]\d|1?\d{1,2})\b")
+
+def _extract_domains(text):
+    domains = set()
+    for token in re.findall(r"[A-Za-z0-9._-]+\.[A-Za-z]{2,63}", text):
+        ext = tldextract.extract(token)
+        if ext.domain and ext.suffix:
+            domains.add(".".join(p for p in [ext.subdomain, ext.domain, ext.suffix] if p))
+    return domains
+
+def _extract_ips(text):
+    ips = set()
+    for m in IPV4_RE.findall(text):
+        ip_str = m if isinstance(m, str) else m[0]
+        try:
+            ip = ipaddress.ip_address(ip_str)
+            if not (ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_multicast):
+                ips.add(str(ip))
+        except ValueError:
+            pass
+    return ips
+
+def _extract_phones(text):
+    phones = set()
+    for m in phonenumbers.PhoneNumberMatcher(text, "US"):
+        if phonenumbers.is_valid_number(m.number):
+            phones.add(phonenumbers.format_number(m.number, phonenumbers.PhoneNumberFormat.E164))
+    return phones
+
+def extract_indicators(text: str):
+    emails = set(map(str.lower, EMAIL_RE.findall(text)))
+    domains = set(map(str.lower, _extract_domains(text)))
+    ips = _extract_ips(text)
+    hashes = set(h.lower() for h in HASH_RE.findall(text))
+    usernames = set(USERNAME_RE.findall(text))
+    phones = _extract_phones(text)
+    return {
+        "emails": emails, "domains": domains, "ips": ips,
+        "hashes": hashes, "usernames": usernames, "phones": phones,
+    }
+
+# ---------- Async DuckDuckGo Dorking ----------
+DUCK_URL = "https://duckduckgo.com/html/"
+UAS = [
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 Version/17.4 Safari/605.1.15",
+]
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=0.6, max=5),
+       retry=retry_if_exception_type(httpx.HTTPError))
+async def _duck(session: httpx.AsyncClient, q: str, max_results=5):
+    headers = {"User-Agent": random.choice(UAS)}
+    r = await session.get(DUCK_URL, params={"q": q}, headers=headers, timeout=15)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, "html.parser")
+    out = []
+    for a in soup.select(".result__a"):
+        href = a.get("href") or ""
+        if href.startswith("/l/?kh="):
+            continue
+        title = a.get_text(strip=True)
+        parent = a.find_parent("div", class_="result")
+        snippet = parent.select_one(".result__snippet").get_text(strip=True) if parent else ""
+        out.append((title, href, snippet))
+        if len(out) >= max_results:
+            break
+    return out
+
+# ---------- Enrichment helpers ----------
+def wayback_summary(domain_or_url, limit=5):
+    base = "http://web.archive.org/cdx/search/cdx"
+    params = {
+        "url": domain_or_url,
+        "output": "json",
+        "filter": "statuscode:200",
+        "collapse": "digest",
+        "limit": str(limit),
+        "fl": "timestamp,original,mimetype,length"
+    }
+    try:
+        r = requests.get(base, params=params, timeout=15)
+        r.raise_for_status()
+        rows = r.json()
+        if not rows or len(rows) <= 1:
+            return []
+        out = []
+        for ts, original, mimetype, length in rows[1:]:
+            dt = datetime.datetime.strptime(ts, "%Y%m%d%H%M%S")
+            out.append({
+                "date": dt.isoformat(),
+                "original": original,
+                "mimetype": mimetype,
+                "length": length,
+                "wayback": f"https://web.archive.org/web/{ts}/{original}",
+            })
+        return out
+    except Exception:
+        return []
+
+def wikidata_search(name, limit=5, lang="en"):
+    endpoint = "https://query.wikidata.org/sparql"
+    q = f"""
+    SELECT ?item ?itemLabel ?alias WHERE {{
+      ?item rdfs:label "{name}"@{lang}.
+      OPTIONAL {{ ?item skos:altLabel ?alias FILTER(LANG(?alias) = "{lang}") }}
+      SERVICE wikibase:label {{ bd:serviceParam wikibase:language "{lang}" }}
+    }} LIMIT {limit}
+    """
+    try:
+        r = requests.get(endpoint, params={"query": q, "format": "json"}, timeout=20,
+                         headers={"User-Agent": "DarkelfAI/1.0 (OSINT tool)"})
+        r.raise_for_status()
+        data = r.json()["results"]["bindings"]
+        results = []
+        for b in data:
+            results.append({
+                "item": b["item"]["value"],
+                "label": b.get("itemLabel", {}).get("value", ""),
+                "alias": b.get("alias", {}).get("value", ""),
+            })
+        return results
+    except Exception:
+        return []
+
+def crtsh_subdomains(domain, limit=100):
+    url = "https://crt.sh/"
+    try:
+        r = requests.get(url, params={"q": f"%.{domain}", "output": "json"}, timeout=20,
+                         headers={"User-Agent": "DarkelfAI/1.0"})
+        r.raise_for_status()
+        data = r.json()
+        subs = set()
+        for row in data[:limit]:
+            name = row.get("name_value", "")
+            for part in name.split("\n"):
+                ext = tldextract.extract(part.strip())
+                if ext.domain and ext.suffix:
+                    subs.add(".".join(p for p in [ext.subdomain, ext.domain, ext.suffix] if p))
+        return sorted(subs)
+    except Exception:
+        return []
+
 class DarkelfAi:
     def __init__(self, model_name="mistral", ctx_size=1024):
         self.console = Console()
@@ -159,7 +314,8 @@ class DarkelfAi:
         self.dialogue = deque(maxlen=10)
 
         self.model_name = model_name
-        self.llm_available = self._start_ollama_server()
+        # ⛔ Don't start Ollama here — lazy start on first ask()
+        self.llm_available = False
 
         self.system_prompt = (
             """You are Darkelf, a local cyber-OSINT assistant. You:
@@ -170,12 +326,133 @@ class DarkelfAi:
 When asked to summarize, provide concise, high-signal analysis with clear recommendations."""
         )
 
+        # Lightweight flags/context
+        self.stealth_mode = False
+        self.case_id = None
+
+    # ---------- QoL helpers ----------
+    def banner(self):
+        self.console.print(
+            f"[bold green]ＤＡＲＫＥＬＦ — OSINT AI[/bold green] "
+            f"[dim]| Model: {self.model_name} "
+            f"| Stealth: {'ON' if self.stealth_mode else 'OFF'} "
+            f"| Case: {self.case_id or 'None'}[/dim]\n"
+        )
+
+    def tag_query(self, query: str) -> str:
+        if "@" in query and re.search(r"\.[A-Za-z]{2,}", query):
+            return "Email"
+        if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", query or ""):
+            return "IP Address"
+        if re.fullmatch(r"\+?\d[\d\s().-]{7,}", query or ""):
+            return "Phone"
+        if re.fullmatch(r"[A-Fa-f0-9]{32,64}", query or ""):
+            return "Hash"
+        if re.fullmatch(r"[A-Za-z0-9._-]+\.[A-Za-z]{2,}", query or ""):
+            return "Domain"
+        return "Username or Keyword"
+
+    def get_stats(self):
+        self.console.print("[bold cyan]🔢 Current Indicator Totals:[/bold cyan]")
+        if not self.memory:
+            self.console.print("  (no indicators yet)")
+            return
+        for label in sorted(self.memory.keys()):
+            self.console.print(f"  {label}: {len(self.memory[label])}")
+
+    def show_history(self, max_items=10):
+        self.console.print("[bold green]🧾 Dialogue History:[/bold green]")
+        if not self.dialogue:
+            self.console.print("  (empty)")
+            return
+        for i, (q, a) in enumerate(list(self.dialogue)[-max_items:], 1):
+            snippet = (a[:160] + "…") if len(a) > 160 else a
+            self.console.print(f"{i}. Q: {q}\n   A: {snippet}\n")
+
+    def export_csv(self, filename="osint_results.csv"):
+        if not hasattr(self, "last_osint_results") or not self.last_osint_results:
+            self.console.print("[red]No results to export.[/red]")
+            return
+        with open(filename, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["Title", "URL", "Snippet"])
+            for title, href, snippet in self.last_osint_results:
+                writer.writerow([title, href, snippet])
+        self.console.print(f"[cyan]📤 OSINT results saved to {filename}[/cyan]")
+
+    def toggle_stealth(self):
+        self.stealth_mode = not self.stealth_mode
+        self.console.print(f"[yellow]🕵️ Stealth mode: {'ON' if self.stealth_mode else 'OFF'}[/yellow]")
+
+    def set_case(self, name: str):
+        self.case_id = name.strip() or None
+        self.console.print(f"[blue]🗂️ Case set to: {self.case_id or 'None'}[/blue]")
+        
+    def enrich(self, wayback_limit=3, crtsh_limit=100, wikidata_limit=2):
+        """
+        Pivot on indicators already in memory:
+        - Wayback snapshots for each domain/URL
+        - crt.sh Certificate Transparency subdomains
+        - Wikidata entity lookups for usernames/names
+        """
+        t0 = time.time()
+        added = {"WAYBACK": 0, "SUBDOMAINS": 0, "WIKIDATA": 0}
+
+        # --- Wayback on domains ---
+        domains = list(self.memory.get("DOMAINS", []))
+        for d in domains:
+            try:
+                snaps = wayback_summary(d, limit=wayback_limit)
+                for s in snaps:
+                    # Ingest the archive URL so it can be summarized/pivoted later
+                    self.ingest_text(f'{s["wayback"]} ({s["date"]} {s["mimetype"]} {s["length"]})')
+                    added["WAYBACK"] += 1
+            except Exception as e:
+                self.console.print(f"[yellow]Wayback error for {d}: {e}[/yellow]")
+
+        # --- crt.sh subdomains ---
+        new_subs = set()
+        for d in domains:
+            try:
+                subs = crtsh_subdomains(d, limit=crtsh_limit)
+                for sd in subs:
+                    if sd not in self.memory.get("DOMAINS", set()):
+                        new_subs.add(sd)
+            except Exception as e:
+                self.console.print(f"[yellow]crt.sh error for {d}: {e}[/yellow]")
+        if new_subs:
+            self.ingest_indicators({"DOMAINS": new_subs})
+            added["SUBDOMAINS"] = len(new_subs)
+
+        # --- Wikidata on usernames ---
+        usernames = list(self.memory.get("USERNAMES", []))
+        for u in usernames:
+            try:
+                hits = wikidata_search(u, limit=wikidata_limit, lang="en")
+                for h in hits:
+                    # Ingest the entity IRI + labels as context
+                    iri = h.get("item", "")
+                    lbl = h.get("label", "")
+                    alias = h.get("alias", "")
+                    self.ingest_text(f"{u} {iri} {lbl} {alias}".strip())
+                    added["WIKIDATA"] += 1
+            except Exception as e:
+                self.console.print(f"[yellow]Wikidata error for {u}: {e}[/yellow]")
+
+        dt = time.time() - t0
+        self.console.print(
+            f"[magenta]Enrichment complete[/magenta] "
+            f"(Wayback: {added['WAYBACK']}, Subdomains: {added['SUBDOMAINS']}, Wikidata: {added['WIKIDATA']}, "
+            f"{dt:.1f}s)."
+        )
+
+    # ---------- LLM (lazy start) ----------
     def _start_ollama_server(self):
         try:
             subprocess.Popen(
                 ["ollama", "serve"],
-                stdout=subprocess.DEVNULL,  # discard stdout
-                stderr=subprocess.DEVNULL   # discard stderr
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
             )
             time.sleep(3)
             return True
@@ -183,18 +460,33 @@ When asked to summarize, provide concise, high-signal analysis with clear recomm
             self.console.print(f"[red]❌ Failed to start ollama server: {e}[/red]")
             return False
 
+    def _ensure_llm(self):
+        if self.llm_available:
+            return True
+        self.llm_available = self._start_ollama_server()
+        return self.llm_available
+
     def _call_ollama(self, prompt):
         try:
             result = subprocess.run(
                 ["ollama", "run", self.model_name],
                 input=prompt.encode(),
-                stdout=subprocess.PIPE,   # keep LLM output
-                stderr=subprocess.DEVNULL # suppress logs
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL
             )
             output = result.stdout.decode(errors="ignore")
             return output.strip()
         except Exception as e:
             return f"[LLM ERROR] {e}"
+
+    # ---------- Indicator extraction ----------
+    @staticmethod
+    def _extract_phones_valid(text, region="US"):
+        out = set()
+        for m in phonenumbers.PhoneNumberMatcher(text, region):
+            if phonenumbers.is_valid_number(m.number):
+                out.add(phonenumbers.format_number(m.number, phonenumbers.PhoneNumberFormat.E164))
+        return out
 
     @staticmethod
     def extract_indicators(text):
@@ -204,7 +496,8 @@ When asked to summarize, provide concise, high-signal analysis with clear recomm
             "hashes": set(re.findall(r"\b[a-fA-F0-9]{32,64}\b", text)),
             "ips": set(re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", text)),
             "domains": set(re.findall(r"\b[a-zA-Z0-9-]+\.(com|net|org|io|xyz|ru|cn|gov|edu)\b", text)),
-            "phones": set(re.findall(r"\+?\d[\d\s().\-]{7,}", text)),
+            # ✅ validate/normalize phones
+            "phones": DarkelfAi._extract_phones_valid(text, "US"),
         }
 
     def ingest_text(self, text):
@@ -212,7 +505,8 @@ When asked to summarize, provide concise, high-signal analysis with clear recomm
         extracted_count = sum(len(v) for v in indicators.values())
         for label, values in indicators.items():
             self.memory[label.upper()].update(values)
-        self.case_context += f"\n{text}"
+        case_prefix = f"[CASE:{self.case_id}] " if self.case_id else ""
+        self.case_context += f"\n{case_prefix}{text}"
         if extracted_count > 0:
             summary = ", ".join([f"{label}:{len(vals)}" for label, vals in indicators.items() if vals])
             self.console.print(f"[green]🧠 Ingested {len(text)} characters, extracted {extracted_count} indicators ({summary}).[/green]")
@@ -236,10 +530,10 @@ When asked to summarize, provide concise, high-signal analysis with clear recomm
                 )
         return "\n".join(lines) if lines else "(No memory yet)"
 
+    # ---------- Prompting ----------
     def _build_prompt(self, question, max_titles=5):
         memory = self.summarize_memory()
         osint_section = ""
-        # Gather OSINT dork results if available
         if hasattr(self, "last_osint_results"):
             items = self.last_osint_results[-max_titles:]
             osint_section = "\n".join(
@@ -254,6 +548,9 @@ When asked to summarize, provide concise, high-signal analysis with clear recomm
         )
 
     def ask(self, question):
+        if not self._ensure_llm():
+            self.console.print("[red]LLM unavailable[/red]")
+            return
         prompt = self._build_prompt(question)
         self.console.print(f"[dim]Prompt length (chars): {len(prompt)}[/dim]")
         self.console.print("[cyan]🤖 Generating response...[/cyan]\n")
@@ -266,45 +563,64 @@ When asked to summarize, provide concise, high-signal analysis with clear recomm
     def _suggest_followups(self, answer):
         self.console.print("[blue]Shortcut prompts: 'summary', 'analysis', 'suggestions', 'next steps'[/blue]")
 
+    # ---------- Export ----------
     def export(self, filename=None):
         filename = filename or f"darkelf_ai_log_{int(time.time())}.json"
         with open(filename, "w", encoding="utf-8") as f:
             json.dump({
                 "context": self.case_context,
                 "memory": {k: list(v) for k, v in self.memory.items()},
-                "dialogue": list(self.dialogue)
+                "dialogue": list(self.dialogue),
+                "case": self.case_id,
+                "stealth": self.stealth_mode,
             }, f, indent=2)
         self.console.print(f"[cyan]📦 Exported dialogue to {filename}[/cyan]")
 
+    # ---------- Phone helpers ----------
+    def _normalize_phone(self, s, region="US"):
+        try:
+            n = phonenumbers.parse(s, region)
+            if phonenumbers.is_valid_number(n):
+                return phonenumbers.format_number(n, phonenumbers.PhoneNumberFormat.E164)  # e.g. +16513094187
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _digits(s):
+        return re.sub(r"\D", "", s or "")
+
+    # ---------- Scanning ----------
     def osintscan(self, query, max_results=10, use_tor=False):
+        tag = self.tag_query(query)
+        self.console.print(f"[bold cyan]Running OSINT scan for:[/bold cyan] [bold]{query}[/bold]  [dim]({tag})[/dim]\n")
+
         proxies = None
-        if use_tor:
-            proxies = {
-                "http": "socks5h://127.0.0.1:9052",
-                "https": "socks5h://127.0.0.1:9052"
-            }
-            
-        self.console.print(f"[bold cyan]Running OSINT scan for:[/bold cyan] [bold]{query}[/bold]\n")
+        if use_tor or self.stealth_mode:
+            proxies = {"http": "socks5h://127.0.0.1:9052", "https": "socks5h://127.0.0.1:9052"}
+
+        # Phone-specific normalization + exact quoting
+        norm_phone = self._normalize_phone(query, "US") if tag == "Phone" else None
+        q_exact = f'"{norm_phone}"' if norm_phone else f'"{query}"'
 
         dork_configs = [
-            (f'"{query}" site:github.com', f'https://duckduckgo.com/html/?q={query}+site:github.com'),
-            (f'"{query}" inurl:profile', f'https://duckduckgo.com/html/?q={query}+inurl:profile'),
+            (f'{q_exact} site:github.com', f'https://duckduckgo.com/html/?q={q_exact}+site:github.com'),
+            (f'{q_exact} inurl:profile',   f'https://duckduckgo.com/html/?q={q_exact}+inurl:profile'),
         ]
         all_results = []
-        headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; DarkelfAI/1.0; +https://github.com/Darkelf2024/)"
-        }
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; DarkelfAI/1.0; +https://github.com/Darkelf2024/)"}
+
         self.console.print("[bold underline blue]\nDuckDuckGo Dorking Results:[/bold underline blue]\n")
         for dork_title, url in dork_configs:
             self.console.print(f"[bold]🔍 Dork: {dork_title}[/bold]")
             try:
-                resp = requests.get(url, headers=headers, timeout=12)
+                resp = requests.get(url, headers=headers, timeout=12, proxies=proxies)
                 soup = BeautifulSoup(resp.text, "html.parser")
                 result_links = soup.select(".result__a")
-                for idx, a in enumerate(result_links, 1):
+                idx_printed = 0
+                for a in result_links:
                     href = a.get("href") or ""
                     text = a.text.strip()
-                    # Try to get snippet text from result parent, fallback to ""
                     snippet = ""
                     parent = a.find_parent("div", class_="result")
                     if parent:
@@ -312,48 +628,72 @@ When asked to summarize, provide concise, high-signal analysis with clear recomm
                         snippet = snippet_tag.text.strip() if snippet_tag else ""
                     if href.startswith("/l/?kh="):
                         continue
+
+                    # ✅ If phone search: only keep hits that actually contain the number
+                    if norm_phone:
+                        digits_target = self._digits(norm_phone)
+                        hay = self._digits(" ".join([text, snippet, href]))
+                        if digits_target not in hay:
+                            continue
+
                     all_results.append((text, href, snippet))
-                    self.console.print(f"   {idx}. [link={href}]{text}[/link]")
-                    if idx >= max_results:
+                    idx_printed += 1
+                    self.console.print(f"   {idx_printed}. [link={href}]{text}[/link]")
+                    if idx_printed >= max_results:
                         break
             except Exception as e:
                 self.console.print(f"[red]Error fetching dork results: {e}[/red]")
             self.console.print()  # Blank line between dorks
 
-        # Save for prompt
         self.last_osint_results = all_results
 
-        # Ingest the titles, links, and snippets for indicator extraction
         for title, href, snippet in all_results:
             self.ingest_text(f"{query} {title} {href} {snippet}")
-        self.ingest_indicators({"USERNAMES": {query}})
+        # If this was a phone search, also ingest the normalized number canonically
+        if norm_phone:
+            self.ingest_indicators({"PHONES": {norm_phone}})
+        else:
+            self.ingest_indicators({"USERNAMES": {query}})
+
         self.console.print("[green]All indicators ingested.[/green]")
 
-        # Now, after showing results, prompt the user for summary/analysis etc
         while True:
             self.console.print(
-                "\n[bold magenta]Type one of: summary, analysis, suggestions, next steps, or type exit to leave.[/bold magenta]"
+                "\n[bold magenta]Type one of: summary(s), analysis(a), suggestions/next(n), stats, history, csv, stealth, case, or exit[/bold magenta]"
             )
             choice = Prompt.ask("What would you like to do?", default="summary").strip().lower()
             if choice in ("exit", "q", "quit", "back"):
                 break
-            elif choice in ("summary", "mem"):
+            elif choice in ("summary", "mem", "s"):
                 self.ask(f"Summarize the OSINT findings for '{query}'. What are the key indicators and recommended next steps?")
-            elif choice == "analysis":
+            elif choice in ("analysis", "a"):
                 self.ask(f"Provide a detailed analysis of the findings for '{query}'.")
-            elif choice == "suggestions":
+            elif choice in ("suggestions", "next", "n"):
                 self.ask(f"Suggest the next recommended OSINT steps for '{query}'.")
-            elif choice == "next steps":
-                self.ask(f"What should be the next steps in the investigation of '{query}'?")
+            elif choice == "stats":
+                self.get_stats()
+            elif choice == "history":
+                self.show_history()
+            elif choice == "csv":
+                self.export_csv()
+            elif choice == "stealth":
+                self.toggle_stealth()
+            elif choice == "case":
+                name = Prompt.ask("Case name (blank to clear)").strip()
+                self.set_case(name)
             else:
                 self.console.print("[red]❌ Unknown choice. Please type a valid shortcut or type exit to leave.[/red]")
 
+    # ---------- CLI ----------
     def run(self):
-        self.console.print("[bold green]👁️‍🗨️ Ready[/bold green]")
+        self.banner()
         self.console.print("[bold green]Darkelf AI — Enhanced OSINT Assistant[/bold green]\n")
         while True:
             try:
-                command = Prompt.ask("[bold magenta]Command[/bold magenta] (ask, ingest, summary, analysis, suggestions, osintscan, export, exit)").strip().lower()
+                command = Prompt.ask(
+                    "[bold magenta]Command[/bold magenta] "
+                    "(ask, ingest, summary(s), analysis(a), suggestions/next(n), osintscan, enrich, stats, history, csv, stealth, case, export, exit)"
+                ).strip().lower()
                 if command == "exit":
                     break
                 elif command == "ask":
@@ -362,17 +702,30 @@ When asked to summarize, provide concise, high-signal analysis with clear recomm
                 elif command == "ingest":
                     text = Prompt.ask("Paste case data or notes")
                     self.ingest_text(text)
-                elif command in ("summary", "mem"):
+                elif command in ("summary", "mem", "s"):
                     self.ask("Provide a summary of current indicators")
-                elif command == "analysis":
+                elif command in ("analysis", "a"):
                     self.ask("Provide an analysis of findings")
-                elif command == "suggestions":
+                elif command in ("suggestions", "next", "n"):
                     self.ask("Provide suggestions for next OSINT steps")
                 elif command == "osintscan":
                     query = Prompt.ask("OSINT scan term/email/username/phone")
-                    self.osintscan(query)
+                    self.osintscan(query, use_tor=self.stealth_mode)
+                elif command == "stats":
+                    self.get_stats()
+                elif command == "history":
+                    self.show_history()
+                elif command == "csv":
+                    self.export_csv()
+                elif command == "stealth":
+                    self.toggle_stealth()
+                elif command == "case":
+                    name = Prompt.ask("Case name (blank to clear)").strip()
+                    self.set_case(name)
                 elif command == "export":
                     self.export()
+                elif command == "enrich":
+                    self.enrich()
                 else:
                     self.console.print("[red]❌ Unknown command[/red]")
             except (KeyboardInterrupt, EOFError):
@@ -381,6 +734,8 @@ When asked to summarize, provide concise, high-signal analysis with clear recomm
             except Exception as e:
                 self.console.print(f"[red]Error: {e}[/red]")
                 continue
+
+
 
 def get_tor_session():
     session = requests.Session()
@@ -5825,7 +6180,7 @@ def repl_main():
 
 if __name__ == "__main__":
     import sys
-
+    
     # 🧠 Check if launched in browser mode
     if "--browser" in sys.argv:
         DarkelfCLIBrowser().run()
@@ -5902,3 +6257,4 @@ if __name__ == "__main__":
     # Step 5: In-memory log cleanup
     for category in pq_logger.logs:
         pq_logger.logs[category].clear()
+
