@@ -1,4 +1,4 @@
-## Darkelf CLI v. Cloud OSINT
+## Darkelf CLI TL v. Cloud OSINT
 
 | Investigation Type                                 | Preferred Tool   | Reason                                                             | Risk Level (Cloud)   | Risk Level (Local CLI)   |
 |:---------------------------------------------------|:-----------------|:-------------------------------------------------------------------|:---------------------|:-----------------|
