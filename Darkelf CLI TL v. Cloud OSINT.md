@@ -20,7 +20,7 @@ This makes it ideal for cyber threat actor profiling, human rights research in h
 **Cloud OSINT** tools are better suited for low-risk, time-sensitive cases such as corporate due diligence, competitive intelligence, and training purposes.
 They offer faster setup, integrated premium datasets, and user-friendly dashboards, but come with inherent privacy and jurisdiction risks.
 
-Darkelf CLI TL can definitely be used for training and educational purposes, especially if you want students or trainees to:
+**Darkelf CLI TL** can definitely be used for training and educational purposes, especially if you want students or trainees to:
 
 - Learn command-line OSINT techniques instead of just clicking in a GUI.
 - Understand data handling and OPSEC from the ground up.
