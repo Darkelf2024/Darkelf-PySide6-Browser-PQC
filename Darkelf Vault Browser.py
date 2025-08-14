@@ -150,7 +150,6 @@ from PyQt5.QtCore import (
     pyqtSignal, QThread
 )
 
-# This is placed here - I will be integrating the second phase later this week plugging into Darkelf Class: I am running tests getting it production ready!
 class DarkelfKernelMonitor(threading.Thread):
     """
     Monitors kernel state and flags forensic-risk activity (e.g., swap use).
@@ -3953,7 +3952,7 @@ class Darkelf(QMainWindow):
         web_view = current_tab.findChild(QWebEngineView)
         if web_view:
             web_view.setHtml(self.custom_homepage_html())
-    
+
     def enable_light_mode(self):
         self.homepage_mode = "light"
         self.load_homepage()
@@ -3967,98 +3966,103 @@ class Darkelf(QMainWindow):
         self.load_homepage()
 
     def custom_homepage_html(self):
-        if self.homepage_mode == "dark":
-            background_color = "#000"
-            text_color = "#ddd"
-            button_color = "#34C759"
-        elif self.homepage_mode == "grey":
-            background_color = "#808080"
-            text_color = "#000"
-            button_color = "#A9A9A9"
-        else:  # light mode
-            background_color = "#fff"
-            text_color = "#000"
-            button_color = "#4CAF50"
-        html_content = f"""
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Darkelf</title>
-            <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons/font/bootstrap-icons.css" rel="stylesheet">
-            <style id="theme-style">
-                body {{
-                    font-family: Arial, sans-serif;
-                    background-color: {background_color};
-                    color: {text_color};
-                    margin: 0;
-                    padding: 0;
-                    display: flex;
-                    flex-direction: column;
-                    height: 100vh;
-                    align-items: center;
-                    justify-content: center;
-                }}
-                .content {{
-                    flex: 1;
-                    display: flex;
-                    flex-direction: column;
-                    align-items: center;
-                    justify-content: center;
-                }}
-                h1 {{
-                    font-size: 36px;
-                    margin-bottom: 20px;
-                    color: {button_color};
-                }}
-                form {{
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    margin-top: 20px;
-                }}
-                input[type="text"] {{
-                    padding: 10px;
-                    width: 500px;
-                    margin-right: 10px;
-                    border: none;
-                    border-radius: 5px;
-                    font-size: 16px;
-                    background-color: #333;
-                    color: #ddd;
-                }}
-                button[type="submit"] {{
-                    padding: 10px 20px;
-                    background-color: {button_color};
-                    border: none;
-                    color: white;
-                    border-radius: 5px;
-                    cursor: pointer;
-                    font-size: 16px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                }}
-                button[type="submit"]:hover {{
-                    background-color: #28A745;
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="content">
-                <h1>Darkelf Browser</h1>
-                <p>Your privacy is our priority.</p>
-                <form id="searchForm" action="https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite/" method="get">
-                    <input type="text" id="searchInput" name="q" placeholder="Search DuckDuckGo">
-                    <button type="submit"><i class="bi bi-search"></i></button>
-                </form>
-            </div>
-        </body>
-        </html>
-        """
-        return html_content
-        
+        return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Darkelf Browser — Post-Quantum, Private, Hardened</title>
+  <link rel="icon" href="/Images/favicon.png" type="image/png" />
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+
+  <style>
+    :root{
+      --bg: #0a0b10;
+      --accent: #34C759;
+      --accent-2: #04A8C8;
+      --border: rgba(255,255,255,.10);
+      --input-bg: #12141b;
+      --input-text: #e5e7eb;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      background: radial-gradient(1200px 600px at 20% -10%, rgba(4,168,200,.25), transparent 60%),
+                  radial-gradient(1000px 600px at 120% 10%, rgba(52,199,89,.18), transparent 60%),
+                  var(--bg);
+      color:#eef2f6;
+      display:flex; flex-direction:column; justify-content:center; align-items:center;
+    }
+    header{display:none;}
+
+    .center-container{text-align:center;}
+
+    .brand{
+      display:flex; gap:10px; align-items:center; justify-content:center;
+      font-weight:700; letter-spacing:.3px; font-size:2rem;
+    }
+    .brand i{color:var(--accent);}
+
+    .tagline{
+      font-size:.95rem; font-weight:700; letter-spacing:.18em;
+      text-transform:uppercase; color:#cfd8e3; margin:6px 0 20px;
+    }
+
+    .search-wrap{
+      display:flex; align-items:stretch; gap:10px; flex-wrap:nowrap; justify-content:center;
+    }
+    .search-wrap input[type="text"]{
+      height:48px;
+      padding:0 16px;
+      width:min(720px, 92vw);
+      border-radius:12px;
+      border:1px solid var(--border);
+      background:var(--input-bg);
+      color:var(--input-text);
+      font-size:16px; outline:none;
+    }
+    .search-wrap input[type="text"]::placeholder{color:#9aa3ad;}
+    .search-wrap input[type="text"]:focus{
+      box-shadow:0 0 0 3px rgba(52,199,89,.30);
+      border-color:transparent;
+    }
+
+    .search-wrap button[type="submit"]{
+      width:48px; height:48px;
+      border-radius:12px;
+      border:none; cursor:pointer; font-size:20px;
+      display:inline-flex; align-items:center; justify-content:center;
+      color:#fff; background:var(--accent);
+    }
+    .search-wrap button[type="submit"]:hover{filter:brightness(1.05);}
+
+    @media (max-width:520px){
+      .search-wrap{flex-wrap:wrap;}
+      .search-wrap button[type="submit"]{width:100%;}
+    }
+  </style>
+</head>
+<body>
+  <div class="center-container">
+    <div class="brand" aria-label="Darkelf Browser home">
+      <i class="bi bi-shield-lock"></i>
+      <span style="color: var(--accent);">Darkelf Browser</span>
+    </div>
+
+    <div class="tagline">Post-Quantum • Private • Hardened</div>
+
+    <form class="search-wrap" action="https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite/" method="get" role="search" aria-label="Search DuckDuckGo">
+      <input type="text" name="q" placeholder="Search DuckDuckGo" aria-label="Search query" />
+      <button type="submit" aria-label="Search"><i class="bi bi-search"></i></button>
+    </form>
+  </div>
+</body>
+</html>
+"""
+
+
     def current_web_view(self):
         return self.tab_widget.currentWidget().findChild(QWebEngineView)
 
@@ -4706,5 +4710,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
