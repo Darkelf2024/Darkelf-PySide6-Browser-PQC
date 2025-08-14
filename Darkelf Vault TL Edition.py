@@ -174,7 +174,43 @@ def make_text_icon(char: str, fg: str = "#e6f0f7", size: int = 18) -> QIcon:
     p.drawText(pm.rect(), Qt.AlignCenter, char)
     p.end()
     return QIcon(pm)
+    
+def apply_darkelf_menu_theme():
+    qApp = QApplication.instance()
+    if not qApp:
+        return
+    qApp.setStyleSheet(qApp.styleSheet() + f"""
+        QMenu {{
+            background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                        stop:0 {THEME['surface']}, stop:1 {THEME['bg']});
+            border: 1px solid {THEME['stroke']};
+            border-radius: 12px;
+            padding: 6px;
+        }}
+        QMenu::separator {{
+            height: 1px;
+            background: {THEME['stroke']};
+            margin: 6px 8px;
+        }}
+        QMenu::item {{
+            color: {THEME['text']};
+            padding: 8px 12px;
+            border-radius: 8px;
+        }}
+        QMenu::item:selected {{
+            background: rgba(24, 247, 122, 0.14);
+        }}
+        QMenu::icon {{ margin-right: 8px; }}
 
+        QToolTip {{
+            background: {THEME['surface']};
+            color: {THEME['text']};
+            border: 1px solid {THEME['stroke']};
+            border-radius: 8px;
+            padding: 6px 8px;
+        }}
+    """)
+    
 class SignalWrapper(QObject):
     osint_result_signal = pyqtSignal(object)
     
@@ -4046,6 +4082,9 @@ class Darkelf(QMainWindow):
         self.web_view = QWebEngineView()
         page = CustomWebEnginePage(profile, self.web_view)
         self.web_view.setPage(page)
+        self.web = self.web_view
+        self.web.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.web.customContextMenuRequested.connect(self.show_darkelf_context_menu)
 
         # Optional signal
         # self.web_view.loadFinished.connect(page.inject_ad_removal_js)
@@ -4368,7 +4407,52 @@ class Darkelf(QMainWindow):
                 color: #34C759;
             }
         """)
+        
+    def show_darkelf_context_menu(self, pos):
+        view = self.web
+        global_pos = view.mapToGlobal(pos)
 
+        data = view.page().contextMenuData()
+        menu = QMenu(self)
+
+        shadow = QGraphicsDropShadowEffect(menu)
+        shadow.setBlurRadius(24)
+        shadow.setXOffset(0)
+        shadow.setYOffset(8)
+        shadow.setColor(QColor(0, 0, 0, 160))
+        menu.setGraphicsEffect(shadow)
+
+        # Navigation
+        act_back    = menu.addAction(make_text_icon('◄', size=16), "Back",    self.go_back)
+        act_forward = menu.addAction(make_text_icon('►', size=16), "Forward", self.go_forward)
+        act_reload  = menu.addAction(make_text_icon('↺', size=16), "Reload",  self.reload_page)
+        act_back.setEnabled(view.history().canGoBack())
+        act_forward.setEnabled(view.history().canGoForward())
+        menu.addSeparator()
+
+        # Link actions if clicking a link
+        if data.linkUrl().isValid():
+            menu.addAction(make_text_icon('⤴', size=16), "Open Link in New Tab",
+                        lambda url=data.linkUrl(): self.open_in_new_tab(url))
+            menu.addAction("Copy Link Address",
+                        lambda url=data.linkUrl(): self.copy_to_clipboard(url.toString()))
+            menu.addSeparator()
+
+        # Edit
+        page = view.page()
+        menu.addAction("Copy",  page.action(page.Copy).trigger) \
+            .setEnabled(bool(data.selectedText()))
+        menu.addAction("Paste", page.action(page.Paste).trigger)
+        menu.addAction("Select All", page.action(page.SelectAll).trigger)
+        menu.addSeparator()
+
+        # Zoom / View
+        menu.addAction(make_text_icon('+', size=16), "Zoom In",  self.zoom_in)
+        menu.addAction(make_text_icon('−', size=16), "Zoom Out", self.zoom_out)
+        menu.addAction(make_text_icon('⛶', size=16), "Full Screen", self.toggle_full_screen)
+
+        menu.exec_(global_pos)
+        
     def style_line_edit(self, line_edit):
         line_edit.setStyleSheet("""
             QLineEdit {
@@ -5299,6 +5383,7 @@ def main():
 
     # Create the application only ONCE
     app = QApplication.instance() or QApplication(sys.argv)
+    apply_darkelf_menu_theme()
 
     # Start the kernel monitor
     monitor = DarkelfKernelMonitor(parent_app=app)
@@ -5319,5 +5404,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
