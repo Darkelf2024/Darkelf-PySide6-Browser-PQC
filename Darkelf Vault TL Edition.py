@@ -206,11 +206,6 @@ class EmailIntelPro:
         except Exception as e:
             print(f"Initialization failed: {e}")
 
-# Placeholder imports (you should define or replace these)
-# from email_intel_pro import EmailIntelPro
-# from some_module import get_tor_session
-
-
 class DarkelfUtils:
     DUCKDUCKGO_LITE = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/lite"
     DUCKDUCKGO_HTML = "https://duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion/html"
