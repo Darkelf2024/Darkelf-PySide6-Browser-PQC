@@ -175,34 +175,6 @@ def make_text_icon(char: str, fg: str = "#e6f0f7", size: int = 18) -> QIcon:
 class SignalWrapper(QObject):
     osint_result_signal = pyqtSignal(object)
     
-class EmailIntelPro:
-    def __init__(self, email, session=None):
-        self.email = email
-        self.session = session or requests.Session()
-        self.domain = email.split("@")[-1] if "@" in email else ""
-        self.prefix = email.split("@")[0] if "@" in email else ""
-        self.mx_records = []
-        self.txt_records = []
-        self.creation_date = None
-        self.disposable = False
-        self.score = 0
-        self.breached = False
-
-    def is_valid_email(self):
-        return bool(re.match(r"^[^@]+@[^@]+\.[^@]+$", self.email))
-
-    async def analyze(self):
-        # Dummy: Add real DNS and breach checks here
-        try:
-            self.mx_records = ["mx1." + self.domain]
-            self.txt_records = ["v=spf1 include:" + self.domain]
-            self.creation_date = "2022-01-01"
-            self.disposable = "mailinator" in self.domain
-            self.score = 100 if not self.disposable else 60
-            self.breached = False
-        except Exception as e:
-            print(f"Initialization failed: {e}")
-
 class DarkelfKernelMonitor(threading.Thread):
     """
     Monitors kernel state and flags forensic-risk activity (e.g., swap use).
