@@ -134,9 +134,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QPushButton, QLineEdit, QVBoxLayout,
     QMenuBar, QToolBar, QDialog, QMessageBox, QFileDialog, QProgressDialog, QTextEdit,
-    QListWidget, QMenu, QWidget, QLabel, QShortcut, QAction, QActionGroup
+    QListWidget, QMenu, QWidget, QLabel, QShortcut, QAction, QActionGroup, QSizePolicy, QToolButton, QHBoxLayout
 )
-from PyQt5.QtGui import QPalette, QColor, QKeySequence, QGuiApplication
+from PyQt5.QtGui import QPalette, QColor, QKeySequence, QGuiApplication, QIcon, QPainter, QPixmap
 from PyQt5.QtWebChannel import QWebChannel
 
 from PyQt5.QtWebEngineWidgets import (
@@ -150,8 +150,30 @@ from PyQt5.QtWebEngineCore import (
 from PyQt5.QtNetwork import QNetworkProxy, QSslConfiguration, QSslSocket, QSsl, QSslCipher
 from PyQt5.QtCore import (
     QUrl, QSettings, Qt, QObject, pyqtSlot, QTimer, QCoreApplication,
-    pyqtSignal, QThread
+    pyqtSignal, QThread, QSize
 )
+
+# --- Darkelf theme helpers ---
+THEME = {
+    "bg":        "#0b0f14",   # app background
+    "surface":   "#11161d",   # toolbar surface
+    "stroke":    "#1f2937",   # borders / dividers
+    "muted":     "#93a4b3",   # secondary text
+    "text":      "#e6f0f7",
+    "accent":    "#18f77a",   # neon green
+    "accentDim": "#0ed967",
+}
+
+def make_text_icon(char: str, fg: str = "#e6f0f7", size: int = 18) -> QIcon:
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.setPen(QColor(fg))
+    p.setFont(p.font())
+    p.drawText(pm.rect(), Qt.AlignCenter, char)
+    p.end()
+    return QIcon(pm)
 
 class SignalWrapper(QObject):
     osint_result_signal = pyqtSignal(object)
@@ -4227,35 +4249,114 @@ class Darkelf(QMainWindow):
         self.create_toolbar()
         self.create_menu_bar()
         self.create_new_tab("home")
+        
+    def _apply_shortcuts(self):
+        QShortcut(QKeySequence("Alt+Left"),  self, activated=self.go_back)
+        QShortcut(QKeySequence("Alt+Right"), self, activated=self.go_forward)
+        QShortcut(QKeySequence("Ctrl+R"),    self, activated=self.reload_page)
+        QShortcut(QKeySequence("F11"),       self, activated=self.toggle_full_screen)
+        QShortcut(QKeySequence("Ctrl+="),    self, activated=self.zoom_in)
+        QShortcut(QKeySequence("Ctrl+-"),    self, activated=self.zoom_out)
 
     def create_toolbar(self):
         toolbar = QToolBar()
-        self.addToolBar(toolbar)
-        back_button = self.create_button('◄', self.go_back)
+        toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+        toolbar.setIconSize(QSize(18, 18))
+        toolbar.setContentsMargins(0, 0, 0, 0)
+        toolbar.setStyleSheet(f"""
+            QToolBar {{
+                background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
+                            stop:0 {THEME['surface']},
+                            stop:1 {THEME['bg']});
+                border: 0px;
+                padding: 6px 10px;
+                spacing: 6px;
+            }}
+            QToolBar::separator {{
+                background: {THEME['stroke']};
+                width: 1px; height: 24px; margin: 0 8px;
+            }}
+            QToolButton {{
+                color: {THEME['text']};
+                background: rgba(255,255,255,0.02);
+                border: 1px solid {THEME['stroke']};
+                border-radius: 10px;
+                padding: 6px 10px;
+            }}
+            QToolButton:hover {{
+                background: rgba(255,255,255,0.06);
+                border-color: {THEME['accentDim']};
+            }}
+            QToolButton:pressed {{
+                background: rgba(24, 247, 122, 0.14);
+                border-color: {THEME['accent']};
+            }}
+            QLineEdit#omni {{
+                color: {THEME['text']};
+                background: {THEME['bg']};
+                border: 1px solid {THEME['stroke']};
+                border-radius: 16px;
+                padding: 8px 14px;
+                selection-background-color: {THEME['accent']};
+                selection-color: #000;
+            }}
+            QLineEdit#omni:focus {{
+                border-color: {THEME['accent']};
+            }}
+        """)
+
+        # Left controls
+        back_button    = self.create_button('', self.go_back,    icon=make_text_icon('◄'))
+        back_button.setToolTip("Back  (Alt+Left)")
+        forward_button = self.create_button('', self.go_forward, icon=make_text_icon('►'))
+        forward_button.setToolTip("Forward  (Alt+Right)")
+        reload_button  = self.create_button('', self.reload_page,icon=make_text_icon('↺'))
+        reload_button.setToolTip("Reload  (Ctrl+R)")
+        home_button    = self.create_button('', self.load_homepage, icon=make_text_icon('⏻', fg=THEME['accent']))
+        home_button.setToolTip("Home")
+
         toolbar.addWidget(back_button)
-        forward_button = self.create_button('►', self.go_forward)
         toolbar.addWidget(forward_button)
-        reload_button = self.create_button('↺', self.reload_page)
         toolbar.addWidget(reload_button)
-        home_button = self.create_button('⏻', self.load_homepage)  # Unicode character for power button
+        toolbar.addSeparator()
         toolbar.addWidget(home_button)
+
+        # Search bar (longer, no icon)
         self.search_bar = QLineEdit(self)
+        self.search_bar.setObjectName("omni")
         self.search_bar.setPlaceholderText("Search or enter URL")
         self.search_bar.returnPressed.connect(self.search_or_load_url)
-        self.style_line_edit(self.search_bar)
+        self.search_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         toolbar.addWidget(self.search_bar)
-        zoom_in_button = self.create_button('+', self.zoom_in)
-        toolbar.addWidget(zoom_in_button)
-        zoom_out_button = self.create_button('-', self.zoom_out)
-        toolbar.addWidget(zoom_out_button)
-        full_screen_button = self.create_button('⛶', self.toggle_full_screen)
-        toolbar.addWidget(full_screen_button)
 
-    def create_button(self, text, callback):
-        button = QPushButton(text)
-        button.clicked.connect(callback)
-        self.style_button(button)
-        return button
+        # Right controls
+        zoom_in_button  = self.create_button('', self.zoom_in,  icon=make_text_icon('+'))
+        zoom_in_button.setToolTip("Zoom In  (Ctrl+=)")
+        zoom_out_button = self.create_button('', self.zoom_out, icon=make_text_icon('−'))
+        zoom_out_button.setToolTip("Zoom Out  (Ctrl+-)")
+        full_button     = self.create_button('', self.toggle_full_screen, icon=make_text_icon('⛶'))
+        full_button.setToolTip("Toggle Full Screen  (F11)")
+
+        toolbar.addSeparator()
+        toolbar.addWidget(zoom_out_button)
+        toolbar.addWidget(zoom_in_button)
+        toolbar.addWidget(full_button)
+
+        self.addToolBar(toolbar)
+        if hasattr(self, "_apply_shortcuts"):
+            self._apply_shortcuts()
+        return toolbar
+
+    def create_button(self, text, slot, icon=None):
+        btn = QToolButton(self)
+        if icon is not None:
+            btn.setIcon(icon)
+        else:
+            btn.setText(text)
+        btn.clicked.connect(slot)
+        btn.setAutoRaise(True)
+        return btn
 
     def style_button(self, button):
         button.setStyleSheet("""
