@@ -52,60 +52,6 @@
 # This software is published under the LGPL v3.0 license and was authored by
 # Dr. Kevin Moore in 2025.
 
-# Darkelf Browser v3.0 – Secure, Privacy-Focused Web Browser
-# Copyright (C) 2025 Dr. Kevin Moore
-#
-# SPDX-License-Identifier: LGPL-3.0-or-later
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU Lesser General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU Lesser General Public License for more details.
-#
-# You should have received a copy of the GNU Lesser General Public License
-# along with this program. If not, see <https://www.gnu.org/licenses/>.
-#
-# EXPORT COMPLIANCE NOTICE:
-# This software contains encryption source code and is made publicly available
-# under the terms of License Exception TSU pursuant to 15 CFR §740.13(e) of the
-# U.S. Export Administration Regulations (EAR).
-#
-# A public release notification has been submitted to the U.S. Bureau of Industry
-# and Security (BIS) and the National Security Agency (NSA) as required by the EAR.
-#
-# The source code includes implementations of standard encryption technologies
-# (such as AES, RSA, ChaCha20, TLS 1.3, and X25519), and is intended for academic,
-# research, and general-purpose use.
-#
-# This code is provided as source only. No compiled binaries are included in this
-# distribution. Redistribution, modification, and use must comply with all applicable
-# U.S. export control laws and regulations.
-#
-# Prohibited Destinations:
-# This software may not be exported, re-exported, or transferred, either directly
-# or indirectly, to:
-# - Countries or territories subject to U.S. embargoes or comprehensive sanctions,
-#   as identified by the U.S. Department of Treasury’s Office of Foreign Assets Control (OFAC)
-#   or the BIS Country Group E:1 or E:2 lists.
-# - Entities or individuals listed on the U.S. Denied Persons List, Entity List,
-#   Specially Designated Nationals (SDN) List, or any other restricted party list.
-#
-# End-Use Restrictions:
-# This software may not be used in the development, production, or deployment of
-# weapons of mass destruction, including nuclear, chemical, or biological weapons,
-# or missile technology, as defined in Part 744 of the EAR.
-#
-# By downloading, using, or distributing this software, you agree to comply with
-# all applicable U.S. export control laws and regulations.
-#
-# This software is published under the LGPL v3.0 license and was authored by
-# Dr. Kevin Moore in 2025.
-
 from __future__ import annotations
 import sys
 import random
