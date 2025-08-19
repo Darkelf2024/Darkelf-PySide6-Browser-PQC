@@ -52,6 +52,60 @@
 # This software is published under the LGPL v3.0 license and was authored by
 # Dr. Kevin Moore in 2025.
 
+# Darkelf Browser v3.0 – Secure, Privacy-Focused Web Browser
+# Copyright (C) 2025 Dr. Kevin Moore
+#
+# SPDX-License-Identifier: LGPL-3.0-or-later
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Lesser General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
+#
+# EXPORT COMPLIANCE NOTICE:
+# This software contains encryption source code and is made publicly available
+# under the terms of License Exception TSU pursuant to 15 CFR §740.13(e) of the
+# U.S. Export Administration Regulations (EAR).
+#
+# A public release notification has been submitted to the U.S. Bureau of Industry
+# and Security (BIS) and the National Security Agency (NSA) as required by the EAR.
+#
+# The source code includes implementations of standard encryption technologies
+# (such as AES, RSA, ChaCha20, TLS 1.3, and X25519), and is intended for academic,
+# research, and general-purpose use.
+#
+# This code is provided as source only. No compiled binaries are included in this
+# distribution. Redistribution, modification, and use must comply with all applicable
+# U.S. export control laws and regulations.
+#
+# Prohibited Destinations:
+# This software may not be exported, re-exported, or transferred, either directly
+# or indirectly, to:
+# - Countries or territories subject to U.S. embargoes or comprehensive sanctions,
+#   as identified by the U.S. Department of Treasury’s Office of Foreign Assets Control (OFAC)
+#   or the BIS Country Group E:1 or E:2 lists.
+# - Entities or individuals listed on the U.S. Denied Persons List, Entity List,
+#   Specially Designated Nationals (SDN) List, or any other restricted party list.
+#
+# End-Use Restrictions:
+# This software may not be used in the development, production, or deployment of
+# weapons of mass destruction, including nuclear, chemical, or biological weapons,
+# or missile technology, as defined in Part 744 of the EAR.
+#
+# By downloading, using, or distributing this software, you agree to comply with
+# all applicable U.S. export control laws and regulations.
+#
+# This software is published under the LGPL v3.0 license and was authored by
+# Dr. Kevin Moore in 2025.
+
 from __future__ import annotations
 import sys
 import random
@@ -80,6 +134,7 @@ import socks
 import warnings
 import mmap
 import signal
+import struct
 import nacl.public
 from nacl.public import PrivateKey, PublicKey
 from nacl.exceptions import CryptoError
@@ -129,6 +184,7 @@ import tempfile
 import psutil
 from PIL import Image
 import piexif
+import zlib
 import tls_client
 
 
@@ -1332,45 +1388,86 @@ class MLKEM768Manager:
         return self.kyber_private_key
 
 class NetworkProtector:
-    def __init__(self, sock, peer_kyber_pub_b64: str, privkey_bytes: bytes = None, direction="outbound", version=1, cover_traffic=True):
+    """
+    Tor-link protector using ML-KEM-768 for KEM + AES-GCM for payload.
+    - Requires: base64-encoded peer Kyber public key at construction (Option A).
+    - For receiving, provide your private key bytes via `privkey_bytes`.
+
+    Packet format (unchanged):
+      {
+        "ciphertext": b64(KEM ct),
+        "nonce": b64(12B),
+        "payload": b64(AESGCM(ciphertext)),
+        "salt": b64(16B),
+        "version": int
+      }
+    """
+    def __init__(
+        self,
+        sock,
+        peer_kyber_pub_b64: str,
+        privkey_bytes: bytes = None,
+        direction: str = "outbound",
+        version: int = 1,
+        cover_traffic: bool = True
+    ):
+        if not isinstance(peer_kyber_pub_b64, str) or not peer_kyber_pub_b64.strip():
+            raise ValueError("peer_kyber_pub_b64 is required (base64-encoded peer Kyber public key).")
+
+        try:
+            peer_pub = base64.b64decode(peer_kyber_pub_b64, validate=True)
+        except Exception as e:
+            raise ValueError(f"peer_kyber_pub_b64 is not valid base64: {e}")
+
         self.sock = sock
         self.secure_random = random.SystemRandom()
-        self.peer_pub = base64.b64decode(peer_kyber_pub_b64)
+        self.peer_pub = peer_pub  # required by encrypt_data_kyber768()
         self.privkey_bytes = privkey_bytes
         self.direction = direction
         self.version = version
         self.cover_traffic = cover_traffic
+
         if cover_traffic:
             threading.Thread(target=self._cover_traffic_loop, daemon=True).start()
 
     def _frame_data(self, payload: bytes) -> bytes:
-        return struct.pack(">I", len(payload)) + payload  # 4-byte big-endian length prefix
+        return struct.pack(">I", len(payload)) + payload
 
     def _unframe_data(self, framed: bytes) -> bytes:
+        if len(framed) < 4:
+            raise ValueError("Framed data too short")
         length = struct.unpack(">I", framed[:4])[0]
+        if len(framed) < 4 + length:
+            raise ValueError("Framed data length prefix exceeds buffer")
         return framed[4:4 + length]
 
-    def add_jitter(self, min_delay=0.05, max_delay=0.3):
+    def add_jitter(self, min_delay: float = 0.05, max_delay: float = 0.3) -> None:
+        if max_delay < min_delay:
+            min_delay, max_delay = max_delay, min_delay
         jitter = self.secure_random.uniform(min_delay, max_delay)
         time.sleep(jitter)
 
-    def send_with_padding(self, data: bytes, min_padding=128, max_padding=512):
+    def send_with_padding(self, data: bytes, min_padding: int = 128, max_padding: int = 512) -> None:
+        if max_padding < min_padding:
+            min_padding, max_padding = max_padding, min_padding
         target_size = max(len(data), self.secure_random.randint(min_padding, max_padding))
         pad_len = target_size - len(data)
         padded = data + os.urandom(pad_len)
-        self.sock.sendall(self._frame_data(padded))  # framed for streaming
+        self.sock.sendall(self._frame_data(padded))
 
-    def send_protected(self, data: bytes):
+    def send_protected(self, data: bytes) -> None:
+        # Requires peer_pub (present because Option A) and will add jitter + padding.
         self.add_jitter()
         compressed = zlib.compress(data)
         encrypted = self.encrypt_data_kyber768(compressed)
         self.send_with_padding(encrypted)
 
     def encrypt_data_kyber768(self, data: bytes) -> bytes:
-        kem = KeyEncapsulation("ML-KEM-768")
+        # KEM with peer's public key; derive AES-GCM key via HKDF.
+        kem = oqs.KeyEncapsulation("ML-KEM-768")
         ciphertext, shared_secret = kem.encap_secret(self.peer_pub)
         salt = os.urandom(16)
-        nonce = os.urandom(12)
+        nonce = os.urandom(12)  # AES-GCM 96-bit nonce
 
         aes_key = HKDF(
             algorithm=hashes.SHA256(),
@@ -1399,15 +1496,30 @@ class NetworkProtector:
         return base64.b64encode(json.dumps(packet).encode())
 
     def receive_protected(self, framed_data: bytes):
-        kem = KeyEncapsulation("ML-KEM-768")
+        # Requires your private key to decapsulate the shared secret.
+        if not self.privkey_bytes:
+            raise ValueError("privkey_bytes is required for receive_protected().")
+
+        kem = oqs.KeyEncapsulation("ML-KEM-768")
         kem.import_secret_key(self.privkey_bytes)
+
         raw = self._unframe_data(framed_data)
-        packet = json.loads(base64.b64decode(raw).decode())
+        try:
+            packet = json.loads(base64.b64decode(raw).decode())
+        except Exception as e:
+            raise ValueError(f"Invalid packet encoding: {e}")
+
+        for field in ("ciphertext", "nonce", "salt", "payload", "version"):
+            if field not in packet:
+                raise ValueError(f"Missing field in packet: {field}")
 
         ciphertext = base64.b64decode(packet["ciphertext"])
         nonce = base64.b64decode(packet["nonce"])
         salt = base64.b64decode(packet["salt"])
         enc_payload = base64.b64decode(packet["payload"])
+
+        if len(nonce) != 12:
+            raise ValueError(f"Invalid nonce length {len(nonce)}; expected 12 bytes")
 
         shared_secret = kem.decap_secret(ciphertext)
         aes_key = HKDF(
@@ -1426,22 +1538,25 @@ class NetworkProtector:
         return {
             "data": original_data,
             "meta": {
-                "id": payload["id"],
-                "timestamp": payload["ts"],
-                "direction": payload["dir"],
+                "id": payload.get("id"),
+                "timestamp": payload.get("ts"),
+                "direction": payload.get("dir"),
                 "version": packet["version"]
             }
         }
 
     def _cover_traffic_loop(self):
+        # Sends padded, encrypted chaff at random intervals (15–45s by default).
+        # Any exception is swallowed, but we back off briefly to avoid tight loops.
         while True:
             try:
                 self.add_jitter(0.2, 1.0)
                 fake_data = secrets.token_bytes(self.secure_random.randint(32, 128))
                 self.send_protected(fake_data)
             except Exception:
-                pass
-            time.sleep(self.secure_random.uniform(15, 45))  # Interval between cover messages
+                time.sleep(self.secure_random.uniform(0.5, 2.0))
+            time.sleep(self.secure_random.uniform(15, 45))
+
 
 class KyberReceiver:
     def __init__(self, priv_key_bytes: bytes):
@@ -4130,17 +4245,41 @@ class Darkelf(QMainWindow):
 
             # Optional SOCKS test with ML-KEM wrapping (if used in your stack)
             try:
-                test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                test_sock.connect(("127.0.0.1", 9052))
-                protector = NetworkProtector(test_sock)  # Assuming this wraps ML-KEM
+                # Connect to your local Tor SOCKS port (adjust if yours is 9050)
+                test_sock = socket.create_connection(("127.0.0.1", 9052), timeout=5)
+
+                # For a one-shot SEND test we still need a *valid* Kyber pubkey to encrypt to.
+                # We'll generate an ephemeral keypair and use its public key as "peer".
+                kem_ephemeral = oqs.KeyEncapsulation("ML-KEM-768")
+                peer_pub_bytes = kem_ephemeral.generate_keypair()       # bytes
+                peer_pub_b64 = base64.b64encode(peer_pub_bytes).decode() # required by NetworkProtector
+
+                # Build the protector (privkey not needed unless you'll call receive_protected())
+                protector = NetworkProtector(
+                    sock=test_sock,
+                    peer_kyber_pub_b64=peer_pub_b64,
+                    privkey_bytes=None,
+                    direction="outbound",
+                    version=1,
+                    cover_traffic=False  # avoid background chatter for a simple connectivity check
+                )
+
                 protector.send_protected(b"[Darkelf] Tor SOCKS test with PQC")
                 test_sock.close()
             except Exception as e:
                 print(f"[Darkelf] Failed test connection through Tor SOCKS: {e}")
-
+                
         except OSError as e:
             QMessageBox.critical(None, "Tor Error", f"Failed to start Tor: {e}")
-
+            
+    def authenticate_cookie(self, controller, cookie_path):
+        try:
+            with open(cookie_path, 'rb') as f:
+                cookie = f.read()
+            controller.authenticate(cookie)
+        except Exception as e:
+            print(f"[Darkelf] Tor cookie authentication failed: {e}")
+            
     def is_tor_running(self):
         try:
             with Controller.from_port(port=9053) as controller:
@@ -5103,3 +5242,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
