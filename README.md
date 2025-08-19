@@ -3,9 +3,9 @@
 ## Overview
 **Darkelf Browser** is a hardened, privacy-first secure browser developed for investigative journalists, activists, penetration testers, and advanced security professionals. Designed to combat advanced persistent threats, it incorporates **post-quantum cryptography**, live JavaScript malware detection via machine learning, and memory-resident anti-forensics.
 
-- Darkelf Vault Browser PySide6, What's blocked Everything!  
+- Darkelf KEM768 Browser PySide6, What's blocked Everything!  
 
-Darkelf Vault Browser uses PySide6 Super Stealth - Head to other Repo
+Darkelf KEM768 Browser uses PySide6 Super Stealth - Head to other Repo
 
 - Tor Letterboxing Mimicking
 - Firefox Headers Cipher Suites
@@ -16,12 +16,6 @@ Darkelf Vault Browser uses PySide6 Super Stealth - Head to other Repo
 - TLS Rotations
 - Super Stealth
 - TLS utilizes X25519/Post Quantum Logic, Ai, PQCryptApi
-
-Darkelf CLI Edition Released: No Gui Download Here [Darkelf CLI OSINT Tool Kit](https://github.com/Darkelf2024/Darkelf-Browser-v3-PQC/edit/main/Darkelf%20CLI%20TL%20OSINT%20Tool%20Kit.py) Enjoy! OSINT Massive Tool!
-
-Darkelf Vault PyQt5: This browser uses ML-KEM-768 for encrypted messaging key storage and secure buffer operations. TLS traffic remains X25519-based due to current web standard constraints!
-
-Download Here [Darkelf Vault Browser](https://github.com/Darkelf2024/Darkelf-Browser-v3-PQC/blob/main/Darkelf%20Vault%20Browser.py)
 
 Built on a fortified QtWebEngine base, Darkelf ensures no disk persistence, disables swap, and isolates all sessions in hardened runtime environments. Please refer to [Disable Swap Guide](https://github.com/Darkelf2024/Darkelf-Browser-v3-PQC/blob/main/disable_swap_macos_guide.md)
 
