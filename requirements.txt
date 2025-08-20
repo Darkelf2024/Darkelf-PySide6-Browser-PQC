@@ -25,7 +25,8 @@ beautifulsoup4==4.13.4
 requests==2.32.4
 stem==1.8.2
 tls-client==1.0.1
-liboqs-python==0.12.0
+
+#liboqs-python==0.12.0
 
 
 # Install the Python wrapper that matches your native liboqs version
