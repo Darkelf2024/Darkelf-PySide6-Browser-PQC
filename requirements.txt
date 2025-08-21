@@ -1,4 +1,4 @@
-cryptography==45.0.5
+cryptography==45.0.6
 dnspython==2.7.0
 joblib==1.5.1
 numpy==2.2.4
