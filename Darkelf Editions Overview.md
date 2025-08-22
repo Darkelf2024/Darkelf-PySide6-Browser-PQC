@@ -26,19 +26,6 @@
 
 ---
 
-## 🧪 Hybrid Regular Editions
-
-- **Use Case:** Experimental Privacy and Cryptographic Research  
-- **Description:**  
-  Hybrid editions combine traditional TLS/SSL stacks with experimental cryptographic primitives. Intended for sandboxed experimentation and rapid prototyping.
-- **Ideal For:**  
-  - Cybersecurity researchers  
-  - Cryptography developers  
-  - Students studying network protocols or secure comms  
-  - Testbeds for zero-day resilience testing  
-
----
-
 ## 🛡️ Darkelf Vault Edition
 
 - **Use Case:** Stealth Mode for Everyday Privacy  
