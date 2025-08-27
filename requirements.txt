@@ -8,7 +8,7 @@ Pillow==11.3.0
 pycryptodome==3.23.0
 pqcrypto==0.3.4
 PySide6==6.9.2
-PySide6-Addons==6.9.1
+PySide6-Addons==6.9.2
 PySide6-Essentials==6.9.2
 PySocks==1.7.1
 requests==2.32.5
